@@ -1,21 +1,13 @@
 package com.vineyard.aivideostudio.ai.gemini
 
-import com.vineyard.aivideostudio.ai.model.AiQaResponse
-import com.vineyard.aivideostudio.ai.model.CaptionDecision
-import com.vineyard.aivideostudio.ai.model.CommentaryDecision
-import com.vineyard.aivideostudio.ai.model.CropDecision
-import com.vineyard.aivideostudio.ai.model.ModelInfo
-import com.vineyard.aivideostudio.ai.model.SourceAnalysis
-import com.vineyard.aivideostudio.ai.model.TrimDecision
-import com.vineyard.aivideostudio.ai.model.ZoomDecision
 import com.vineyard.aivideostudio.core.model.PipelineStatus
 import com.vineyard.aivideostudio.core.result.AppError
 import com.vineyard.aivideostudio.core.result.AppResult
-import com.vineyard.aivideostudio.core.util.JsonUtils
 import com.vineyard.aivideostudio.data.local.database.dao.AiRequestDao
 import com.vineyard.aivideostudio.data.local.database.entity.AiRequestEntity
 import com.vineyard.aivideostudio.data.preferences.GeminiPreferences
 import com.vineyard.aivideostudio.data.remote.gemini.ContentDto
+import com.vineyard.aivideostudio.data.remote.gemini.FileDataDto
 import com.vineyard.aivideostudio.data.remote.gemini.GenerateContentRequest
 import com.vineyard.aivideostudio.data.remote.gemini.GenerationConfigDto
 import com.vineyard.aivideostudio.data.remote.gemini.GeminiApiService
@@ -36,6 +28,8 @@ class GeminiClient(
         stage: PipelineStatus,
         modelId: String,
         prompt: String,
+        mediaUri: String? = null,
+        mediaMimeType: String = "video/mp4",
         parser: (String) -> T?
     ): AppResult<T> = withContext(Dispatchers.IO) {
         val apiKey = preferences.getApiKey()
@@ -44,11 +38,27 @@ class GeminiClient(
         }
 
         val cleanModel = if (modelId.startsWith("models/")) modelId else "models/$modelId"
+        
+        // Build multimodal parts: Text instruction + optional Video/Audio file_data
+        val parts = mutableListOf<PartDto>()
+        parts.add(PartDto(text = prompt))
+        
+        if (!mediaUri.isNullOrBlank()) {
+            parts.add(
+                PartDto(
+                    fileData = FileDataDto(
+                        fileUri = mediaUri,
+                        mimeType = mediaMimeType
+                    )
+                )
+            )
+        }
+
         val request = GenerateContentRequest(
             contents = listOf(
                 ContentDto(
                     role = "user",
-                    parts = listOf(PartDto(text = prompt))
+                    parts = parts
                 )
             ),
             generationConfig = GenerationConfigDto(
