@@ -11,7 +11,7 @@ data class ListModelsResponse(
 
 @JsonClass(generateAdapter = true)
 data class ModelDto(
-    val name: String, // e.g. "models/gemini-3.5-flash"
+    val name: String, // e.g. "models/gemini-2.5-flash"
     val baseModelId: String? = null,
     val version: String? = null,
     val displayName: String? = null,
@@ -40,12 +40,19 @@ data class ContentDto(
 @JsonClass(generateAdapter = true)
 data class PartDto(
     val text: String? = null,
-    val inlineData: InlineDataDto? = null
+    val inlineData: InlineDataDto? = null,
+    @Json(name = "file_data") val fileData: FileDataDto? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class FileDataDto(
+    @Json(name = "file_uri") val fileUri: String,
+    @Json(name = "mime_type") val mimeType: String = "video/mp4"
 )
 
 @JsonClass(generateAdapter = true)
 data class InlineDataDto(
-    val mimeType: String,
+    @Json(name = "mime_type") val mimeType: String,
     val data: String // base64
 )
 
@@ -90,4 +97,18 @@ data class UsageMetadataDto(
     val promptTokenCount: Int? = null,
     val candidatesTokenCount: Int? = null,
     val totalTokenCount: Int? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class FileUploadResponse(
+    val file: FileInfoDto? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class FileInfoDto(
+    val name: String? = null,
+    val uri: String? = null,
+    val mimeType: String? = null,
+    val state: String? = null,
+    val sizeBytes: String? = null
 )
