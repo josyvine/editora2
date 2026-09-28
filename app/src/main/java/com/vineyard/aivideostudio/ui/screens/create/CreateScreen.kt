@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentPaste
@@ -31,7 +32,6 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Upload
-import androidx.compose.material.icons.filled.Zap
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -89,7 +89,6 @@ fun CreateScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val clipboardManager = LocalClipboardManager.current
 
-    // Video File Picker
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
@@ -98,7 +97,6 @@ fun CreateScreen(
         }
     }
 
-    // JSON Recipe File Picker (Multi-MIME ensures JSON files are never greyed out)
     val jsonPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -411,10 +409,9 @@ fun CreateScreen(
                 }
             }
 
-            // STEP 2 (BRANCHED BY MODE): Context URL vs. Master Recipe JSON Ingestion
+            // STEP 2: Context URL vs. Master Recipe JSON Ingestion
             item {
                 if (state.isRecipeMode) {
-                    // RECIPE INGEST CARD
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(containerColor = StudioSurface),
@@ -537,7 +534,6 @@ fun CreateScreen(
                         }
                     }
                 } else {
-                    // CONTEXT URL CARD (Auto AI Mode)
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(containerColor = StudioSurface),
@@ -741,7 +737,6 @@ fun CreateScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // Check 1: Local Video
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 imageVector = if (state.selectedVideoUri != null) Icons.Filled.CheckCircle else Icons.AutoMirrored.Filled.HelpOutline,
@@ -763,7 +758,6 @@ fun CreateScreen(
 
                         Spacer(modifier = Modifier.height(6.dp))
 
-                        // Check 2: Context or Recipe
                         if (state.isRecipeMode) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
@@ -849,7 +843,7 @@ fun CreateScreen(
                     } else {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                if (state.isRecipeMode) Icons.Filled.Zap else Icons.Filled.AutoAwesome,
+                                imageVector = if (state.isRecipeMode) Icons.Filled.Bolt else Icons.Filled.AutoAwesome,
                                 contentDescription = null,
                                 tint = if (state.isReadyToCreate) TextPrimary else TextTertiary,
                                 modifier = Modifier.size(20.dp)
