@@ -10,6 +10,7 @@ data class Project(
     val sourcePath: String,
     val currentVideoUri: String,
     val sourceYoutubeUrl: String? = null,
+    val masterRecipeJson: String? = null, // Ingested Master Recipe from AI Studio Web
     val finalVideoUri: String? = null,
     val thumbnailUri: String? = null,
     val metadata: VideoMetadata = VideoMetadata(),
