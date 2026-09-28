@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.vineyard.aivideostudio.ai.model.MasterRecipe
 import com.vineyard.aivideostudio.core.model.PipelineStatus
 import com.vineyard.aivideostudio.core.model.Project
 import com.vineyard.aivideostudio.core.model.TimelineMap
@@ -19,6 +20,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.util.UUID
 
 data class CreateUiState(
@@ -28,6 +31,10 @@ data class CreateUiState(
     val videoMetadata: VideoMetadata? = null,
     val targetAspectRatio: String = "ORIGINAL", // ORIGINAL, 9:16, 16:9, 1:1
     val youtubeUrl: String = "",
+    val isRecipeMode: Boolean = false, // Toggle: Auto AI vs. Master Recipe Import
+    val masterRecipeJson: String = "",
+    val masterRecipeFileName: String? = null,
+    val parsedRecipe: MasterRecipe? = null,
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val createdProjectId: String? = null
@@ -44,13 +51,13 @@ data class CreateUiState(
         }
 
     val isReadyToCreate: Boolean
-        get() = selectedVideoUri != null && isYoutubeUrlValid && !isLoading
+        get() = if (isRecipeMode) {
+            selectedVideoUri != null && parsedRecipe != null && !isLoading
+        } else {
+            selectedVideoUri != null && isYoutubeUrlValid && !isLoading
+        }
 
     companion object {
-        /**
-         * Validates that the provided reference URL is a valid public web video URL.
-         * Supports any public domain (YouTube, Vimeo, example.com, custom streaming hosts).
-         */
         fun isValidYoutubeUrl(url: String): Boolean {
             val trimmed = url.trim().lowercase()
             if (trimmed.isEmpty()) return false
@@ -81,6 +88,68 @@ class CreateViewModel(
 
     fun onYoutubeUrlChanged(url: String) {
         _uiState.value = _uiState.value.copy(youtubeUrl = url, errorMessage = null)
+    }
+
+    fun onModeToggled(isRecipeMode: Boolean) {
+        _uiState.value = _uiState.value.copy(isRecipeMode = isRecipeMode, errorMessage = null)
+    }
+
+    fun onJsonFileSelected(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+                val inputStream = context.contentResolver.openInputStream(uri)
+                    ?: throw IllegalArgumentException("Cannot open selected JSON file")
+                val text = BufferedReader(InputStreamReader(inputStream)).use { it.readText() }
+                val parsed = JsonUtils.fromJson<MasterRecipe>(text)
+                    ?: throw IllegalArgumentException("Invalid Editora Master Recipe JSON format")
+
+                val fileName = UriUtils.getFileName(context, uri)
+                val defaultProjectName = parsed.projectInfo?.title ?: _uiState.value.projectName
+                val defaultRatio = parsed.projectInfo?.targetAspectRatio ?: _uiState.value.targetAspectRatio
+
+                _uiState.value = _uiState.value.copy(
+                    isRecipeMode = true,
+                    masterRecipeJson = text,
+                    masterRecipeFileName = fileName,
+                    parsedRecipe = parsed,
+                    projectName = if (_uiState.value.projectName.isBlank()) defaultProjectName else _uiState.value.projectName,
+                    targetAspectRatio = defaultRatio,
+                    isLoading = false,
+                    errorMessage = null
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = "Failed to load Recipe JSON: ${e.message}"
+                )
+            }
+        }
+    }
+
+    fun onJsonPasted(jsonText: String) {
+        if (jsonText.isBlank()) return
+        try {
+            val parsed = JsonUtils.fromJson<MasterRecipe>(jsonText.trim())
+                ?: throw IllegalArgumentException("Invalid Editora Master Recipe JSON structure")
+
+            val defaultProjectName = parsed.projectInfo?.title ?: _uiState.value.projectName
+            val defaultRatio = parsed.projectInfo?.targetAspectRatio ?: _uiState.value.targetAspectRatio
+
+            _uiState.value = _uiState.value.copy(
+                isRecipeMode = true,
+                masterRecipeJson = jsonText.trim(),
+                masterRecipeFileName = "Pasted_Recipe.json",
+                parsedRecipe = parsed,
+                projectName = if (_uiState.value.projectName.isBlank()) defaultProjectName else _uiState.value.projectName,
+                targetAspectRatio = defaultRatio,
+                errorMessage = null
+            )
+        } catch (e: Exception) {
+            _uiState.value = _uiState.value.copy(
+                errorMessage = "Failed to parse pasted Recipe: ${e.message}"
+            )
+        }
     }
 
     fun onVideoSelected(uri: Uri) {
@@ -114,24 +183,29 @@ class CreateViewModel(
     fun createProject() {
         val state = _uiState.value
 
-        // Mandatory validation 1: Source video file must be provided
         if (state.selectedVideoUri == null) {
             _uiState.value = state.copy(
-                errorMessage = "Please select the source video file from your device (Shorts or Long-Form)."
+                errorMessage = "Please select the source video file from your device."
             )
             return
         }
 
-        // Mandatory validation 2: Source context link must be valid
-        if (state.youtubeUrl.isBlank() || !state.isYoutubeUrlValid) {
+        if (!state.isRecipeMode && (state.youtubeUrl.isBlank() || !state.isYoutubeUrlValid)) {
             _uiState.value = state.copy(
-                errorMessage = "Please provide a valid source context URL (e.g. https://example.com/video/... or a public video link)."
+                errorMessage = "Please provide a valid source context URL or switch to Master Recipe Mode."
+            )
+            return
+        }
+
+        if (state.isRecipeMode && state.parsedRecipe == null) {
+            _uiState.value = state.copy(
+                errorMessage = "Please upload or paste a valid Master Recipe JSON script."
             )
             return
         }
 
         val name = if (state.projectName.isBlank()) {
-            "Studio Video ${System.currentTimeMillis() % 1000}"
+            state.parsedRecipe?.projectInfo?.title ?: "Studio Video ${System.currentTimeMillis() % 1000}"
         } else {
             state.projectName.trim()
         }
@@ -144,7 +218,6 @@ class CreateViewModel(
 
                 val metadata = state.videoMetadata ?: VideoMetadata()
 
-                // Copy source media into sandboxed project storage
                 val destFile = storageManager.getSourceFile(projectId)
                 FileUtils.copyUriToFile(context, state.selectedVideoUri, destFile)
                 val sourcePath = destFile.absolutePath
@@ -158,7 +231,8 @@ class CreateViewModel(
                     sourceUri = sourceUriString,
                     sourcePath = sourcePath,
                     currentVideoUri = sourceUriString,
-                    sourceYoutubeUrl = state.youtubeUrl.trim(),
+                    sourceYoutubeUrl = if (!state.isRecipeMode) state.youtubeUrl.trim() else null,
+                    masterRecipeJson = if (state.isRecipeMode) state.masterRecipeJson else null,
                     metadata = metadata,
                     currentStage = PipelineStatus.IDLE,
                     status = PipelineStatus.IDLE,
