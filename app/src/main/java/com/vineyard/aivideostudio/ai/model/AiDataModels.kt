@@ -29,6 +29,15 @@ data class EditingCandidate(
 )
 
 @JsonClass(generateAdapter = true)
+data class HighlightSegment(
+    val start: Double,
+    val end: Double,
+    val title: String = "",
+    val description: String = "",
+    val importance: String = "HIGH" // CRITICAL, HIGH, MEDIUM
+)
+
+@JsonClass(generateAdapter = true)
 data class SourceAnalysis(
     val duration: Double,
     val resolution: String = "1920x1080",
@@ -38,6 +47,7 @@ data class SourceAnalysis(
     val scenes: List<SceneSegment> = emptyList(),
     val dialogueSegments: List<DialogueSegment> = emptyList(),
     val criticalContent: List<String> = emptyList(),
+    val highlights: List<HighlightSegment> = emptyList(),
     val editingCandidates: List<EditingCandidate> = emptyList(),
     val suggestedEditingStrategy: String = ""
 )
@@ -51,9 +61,11 @@ data class TrimSegment(
 
 @JsonClass(generateAdapter = true)
 data class TrimDecision(
-    val operation: String = "trim", // "trim" or "skip"
+    val operation: String = "trim", // "trim", "highlight_compile", or "skip"
     val isNecessary: Boolean = false,
+    val targetMode: String = "HIGHLIGHTS", // "SHORT_60S", "RECAP_EXTENDED", "TRIM_REMOVE"
     val segmentsToRemove: List<TrimSegment> = emptyList(),
+    val segmentsToKeep: List<HighlightSegment> = emptyList(),
     val explanation: String = ""
 )
 
