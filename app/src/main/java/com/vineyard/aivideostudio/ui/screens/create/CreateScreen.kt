@@ -23,12 +23,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SmartDisplay
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Zap
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -42,6 +45,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -82,11 +89,21 @@ fun CreateScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val clipboardManager = LocalClipboardManager.current
 
-    val filePickerLauncher = rememberLauncherForActivityResult(
+    // Video File Picker
+    val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri != null) {
             viewModel.onVideoSelected(uri)
+        }
+    }
+
+    // JSON Recipe File Picker (Multi-MIME ensures JSON files are never greyed out)
+    val jsonPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.onJsonFileSelected(uri)
         }
     }
 
@@ -115,13 +132,58 @@ fun CreateScreen(
         ) {
             item { Spacer(modifier = Modifier.height(4.dp)) }
 
+            // Mode Selector: Auto AI vs. Import Recipe
+            item {
+                TabRow(
+                    selectedTabIndex = if (state.isRecipeMode) 1 else 0,
+                    containerColor = StudioSurfaceElevated,
+                    contentColor = TextPrimary,
+                    indicator = { tabPositions ->
+                        TabRowDefaults.SecondaryIndicator(
+                            Modifier.tabIndicatorOffset(tabPositions[if (state.isRecipeMode) 1 else 0]),
+                            color = VioletAccent
+                        )
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                ) {
+                    Tab(
+                        selected = !state.isRecipeMode,
+                        onClick = { viewModel.onModeToggled(false) },
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Auto AI Pipeline", fontWeight = FontWeight.Bold)
+                            }
+                        },
+                        selectedContentColor = VioletAccent,
+                        unselectedContentColor = TextSecondary
+                    )
+                    Tab(
+                        selected = state.isRecipeMode,
+                        onClick = { viewModel.onModeToggled(true) },
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Code, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Import Master Recipe", fontWeight = FontWeight.Bold)
+                            }
+                        },
+                        selectedContentColor = VioletAccent,
+                        unselectedContentColor = TextSecondary
+                    )
+                }
+            }
+
             // Project Name Input
             item {
                 OutlinedTextField(
                     value = state.projectName,
                     onValueChange = { viewModel.onProjectNameChanged(it) },
                     label = { Text("Project Title") },
-                    placeholder = { Text("e.g. Playmaking Highlights Commentary Edit") },
+                    placeholder = { Text("e.g. Highlight Commentary Edit") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("create_project_name_input"),
@@ -138,7 +200,7 @@ fun CreateScreen(
                 )
             }
 
-            // Copyright Protection & Transformative Editing Banner
+            // Copyright Transformation Banner
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -168,7 +230,7 @@ fun CreateScreen(
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = "Original audio will be purged. Dead air will be trimmed, subtitles burned in, and an original AI voiceover soundtrack injected.",
+                                text = "Original audio will be purged. Dead air trimmed, concealer subtitles burned in, and replacement AI voiceover mixed.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary,
                                 lineHeight = 16.sp
@@ -178,7 +240,7 @@ fun CreateScreen(
                 }
             }
 
-            // STEP 1: Downloaded Local Video File (Supports Shorts & Long-Form)
+            // STEP 1: Choose Video File from Device
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -241,7 +303,6 @@ fun CreateScreen(
                         Spacer(modifier = Modifier.height(14.dp))
 
                         if (state.selectedVideoUri != null && state.videoMetadata != null) {
-                            // Selected Video Preview & Info
                             VideoPreviewPlayer(
                                 videoUriString = state.selectedVideoUri.toString(),
                                 muteOriginalAudio = false,
@@ -264,7 +325,7 @@ fun CreateScreen(
                                             .padding(horizontal = 6.dp, vertical = 2.dp)
                                     ) {
                                         Text(
-                                            text = if (isVertical) "SHORTS / REEL (9:16)" else "STANDARD (16:9)",
+                                            text = if (isVertical) "SHORTS (9:16)" else "STANDARD (16:9)",
                                             color = VioletAccent,
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold
@@ -304,7 +365,7 @@ fun CreateScreen(
 
                             Spacer(modifier = Modifier.height(10.dp))
                             Button(
-                                onClick = { filePickerLauncher.launch("video/*") },
+                                onClick = { videoPickerLauncher.launch("video/*") },
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(containerColor = StudioSurfaceElevated),
                                 shape = RoundedCornerShape(8.dp)
@@ -312,7 +373,6 @@ fun CreateScreen(
                                 Text("Change Video File", color = TextPrimary)
                             }
                         } else {
-                            // Unselected Upload Box
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -320,7 +380,7 @@ fun CreateScreen(
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(StudioCardBg)
                                     .border(1.dp, BorderSubtle, RoundedCornerShape(10.dp))
-                                    .clickable { filePickerLauncher.launch("video/*") }
+                                    .clickable { videoPickerLauncher.launch("video/*") }
                                     .padding(16.dp)
                                     .testTag("create_select_video_box"),
                                 contentAlignment = Alignment.Center
@@ -351,157 +411,283 @@ fun CreateScreen(
                 }
             }
 
-            // STEP 2: Source Context Reference URL
+            // STEP 2 (BRANCHED BY MODE): Context URL vs. Master Recipe JSON Ingestion
             item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = StudioSurface),
-                    shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (state.isYoutubeUrlValid) EmeraldSuccess.copy(alpha = 0.5f) else BorderSubtle
-                    )
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .background(if (state.isYoutubeUrlValid) EmeraldSuccess.copy(alpha = 0.2f) else VioletPrimary.copy(alpha = 0.2f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "2",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                    color = if (state.isYoutubeUrlValid) EmeraldSuccess else VioletAccent
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                if (state.isRecipeMode) {
+                    // RECIPE INGEST CARD
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = StudioSurface),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (state.parsedRecipe != null) EmeraldSuccess.copy(alpha = 0.5f) else BorderSubtle
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clip(CircleShape)
+                                        .background(if (state.parsedRecipe != null) EmeraldSuccess.copy(alpha = 0.2f) else VioletPrimary.copy(alpha = 0.2f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
                                     Text(
-                                        text = "Source Context URL",
+                                        text = "2",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = if (state.parsedRecipe != null) EmeraldSuccess else VioletAccent
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Upload Master Recipe JSON",
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.Bold,
                                         color = TextPrimary
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "(Context Link)",
+                                        text = "Generated from Google AI Studio Web (skips in-app AI analysis)",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (state.isYoutubeUrlValid) EmeraldSuccess else AmberAccent,
-                                        fontWeight = FontWeight.SemiBold
+                                        color = TextSecondary
                                     )
                                 }
-                                Text(
-                                    text = "Gemini analyzes this reference URL for scene context, dialogue & scriptwriting",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = TextSecondary
-                                )
+                                if (state.parsedRecipe != null) {
+                                    Icon(
+                                        Icons.Filled.CheckCircle,
+                                        contentDescription = null,
+                                        tint = EmeraldSuccess,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
-                            if (state.isYoutubeUrlValid) {
-                                Icon(
-                                    Icons.Filled.CheckCircle,
-                                    contentDescription = null,
-                                    tint = EmeraldSuccess,
-                                    modifier = Modifier.size(20.dp)
-                                )
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            if (state.parsedRecipe != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(EmeraldSuccess.copy(alpha = 0.1f))
+                                        .border(1.dp, EmeraldSuccess.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                                        .padding(12.dp)
+                                ) {
+                                    Column {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(Icons.Filled.DataObject, contentDescription = null, tint = EmeraldSuccess, modifier = Modifier.size(18.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "Recipe Loaded: ${state.masterRecipeFileName ?: "Master_Recipe.json"}",
+                                                fontWeight = FontWeight.Bold,
+                                                color = EmeraldSuccess,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = "• Highlights to Splice: ${state.parsedRecipe?.editingPlan?.segmentsToKeep?.size ?: 0} scenes\n" +
+                                                    "• Captions to Burn: ${state.parsedRecipe?.captions?.size ?: 0} lines\n" +
+                                                    "• Commentary Tone: ${state.parsedRecipe?.commentary?.tone ?: "Dynamic"}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextPrimary,
+                                            lineHeight = 16.sp
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(10.dp))
                             }
-                        }
 
-                        Spacer(modifier = Modifier.height(14.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        jsonPickerLauncher.launch(
+                                            arrayOf("application/json", "text/plain", "text/json", "application/octet-stream", "*/*")
+                                        )
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = StudioSurfaceElevated),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Upload .json", fontSize = 12.sp)
+                                }
 
-                        OutlinedTextField(
-                            value = state.youtubeUrl,
-                            onValueChange = { viewModel.onYoutubeUrlChanged(it) },
-                            label = { Text("Public Source Context URL") },
-                            placeholder = { Text("https://example.com/shorts/... or https://example.com/watch?v=...") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("create_youtube_url_input"),
-                            shape = RoundedCornerShape(8.dp),
-                            singleLine = true,
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Filled.SmartDisplay,
-                                    contentDescription = null,
-                                    tint = if (state.isYoutubeUrlValid) EmeraldSuccess else VioletAccent
-                                )
-                            },
-                            trailingIcon = {
-                                IconButton(
+                                Button(
                                     onClick = {
                                         clipboardManager.getText()?.text?.let { clipText ->
-                                            viewModel.onYoutubeUrlChanged(clipText)
+                                            viewModel.onJsonPasted(clipText)
                                         }
-                                    }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = StudioSurfaceElevated),
+                                    shape = RoundedCornerShape(8.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.ContentPaste,
-                                        contentDescription = "Paste from clipboard",
-                                        tint = TextSecondary
+                                    Icon(Icons.Filled.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Paste Script", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // CONTEXT URL CARD (Auto AI Mode)
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = StudioSurface),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (state.isYoutubeUrlValid) EmeraldSuccess.copy(alpha = 0.5f) else BorderSubtle
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clip(CircleShape)
+                                        .background(if (state.isYoutubeUrlValid) EmeraldSuccess.copy(alpha = 0.2f) else VioletPrimary.copy(alpha = 0.2f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "2",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = if (state.isYoutubeUrlValid) EmeraldSuccess else VioletAccent
                                     )
                                 }
-                            },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = if (state.isYoutubeUrlValid) EmeraldSuccess else VioletPrimary,
-                                unfocusedBorderColor = if (state.isYoutubeUrlValid) EmeraldSuccess.copy(alpha = 0.6f) else BorderSubtle,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = "Source Context URL",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "(Context Link)",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (state.isYoutubeUrlValid) EmeraldSuccess else AmberAccent,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    Text(
+                                        text = "Gemini analyzes this reference URL for scene context, dialogue & scriptwriting",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                                if (state.isYoutubeUrlValid) {
+                                    Icon(
+                                        Icons.Filled.CheckCircle,
+                                        contentDescription = null,
+                                        tint = EmeraldSuccess,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            OutlinedTextField(
+                                value = state.youtubeUrl,
+                                onValueChange = { viewModel.onYoutubeUrlChanged(it) },
+                                label = { Text("Public Source Context URL") },
+                                placeholder = { Text("https://example.com/shorts/... or https://example.com/watch?v=...") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("create_youtube_url_input"),
+                                shape = RoundedCornerShape(8.dp),
+                                singleLine = true,
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Filled.SmartDisplay,
+                                        contentDescription = null,
+                                        tint = if (state.isYoutubeUrlValid) EmeraldSuccess else VioletAccent
+                                    )
+                                },
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = {
+                                            clipboardManager.getText()?.text?.let { clipText ->
+                                                viewModel.onYoutubeUrlChanged(clipText)
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.ContentPaste,
+                                            contentDescription = "Paste from clipboard",
+                                            tint = TextSecondary
+                                        )
+                                    }
+                                },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = if (state.isYoutubeUrlValid) EmeraldSuccess else VioletPrimary,
+                                    unfocusedBorderColor = if (state.isYoutubeUrlValid) EmeraldSuccess.copy(alpha = 0.6f) else BorderSubtle,
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary
+                                )
                             )
-                        )
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (state.isYoutubeUrlValid) {
-                                Icon(
-                                    Icons.Filled.CheckCircle,
-                                    contentDescription = null,
-                                    tint = EmeraldSuccess,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Valid source reference URL linked for Gemini semantic analysis",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = EmeraldSuccess
-                                )
-                            } else if (state.youtubeUrl.isNotBlank()) {
-                                Icon(
-                                    Icons.Filled.ErrorOutline,
-                                    contentDescription = null,
-                                    tint = AmberAccent,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Enter a valid video reference link (e.g. https://example.com/...)",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = AmberAccent
-                                )
-                            } else {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.HelpOutline,
-                                    contentDescription = null,
-                                    tint = TextTertiary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Paste the reference URL of the downloaded video above",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = TextTertiary
-                                )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (state.isYoutubeUrlValid) {
+                                    Icon(
+                                        Icons.Filled.CheckCircle,
+                                        contentDescription = null,
+                                        tint = EmeraldSuccess,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Valid source reference URL linked for Gemini semantic analysis",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = EmeraldSuccess
+                                    )
+                                } else if (state.youtubeUrl.isNotBlank()) {
+                                    Icon(
+                                        Icons.Filled.ErrorOutline,
+                                        contentDescription = null,
+                                        tint = AmberAccent,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Enter a valid video reference link",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = AmberAccent
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.HelpOutline,
+                                        contentDescription = null,
+                                        tint = TextTertiary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Paste the reference URL of the downloaded video above",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextTertiary
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Target Aspect Ratio Selector
+            // Target Aspect Ratio
             item {
                 Text(
                     text = "TARGET PRODUCTION ASPECT RATIO",
@@ -555,6 +741,7 @@ fun CreateScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
 
+                        // Check 1: Local Video
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 imageVector = if (state.selectedVideoUri != null) Icons.Filled.CheckCircle else Icons.AutoMirrored.Filled.HelpOutline,
@@ -576,29 +763,51 @@ fun CreateScreen(
 
                         Spacer(modifier = Modifier.height(6.dp))
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = if (state.isYoutubeUrlValid) Icons.Filled.CheckCircle else Icons.AutoMirrored.Filled.HelpOutline,
-                                contentDescription = null,
-                                tint = if (state.isYoutubeUrlValid) EmeraldSuccess else AmberAccent,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (state.isYoutubeUrlValid) {
-                                    "Source Context: Linked for AI reasoning"
-                                } else {
-                                    "Source Context: Required (Paste video reference link)"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (state.isYoutubeUrlValid) TextPrimary else TextSecondary
-                            )
+                        // Check 2: Context or Recipe
+                        if (state.isRecipeMode) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = if (state.parsedRecipe != null) Icons.Filled.CheckCircle else Icons.AutoMirrored.Filled.HelpOutline,
+                                    contentDescription = null,
+                                    tint = if (state.parsedRecipe != null) EmeraldSuccess else AmberAccent,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (state.parsedRecipe != null) {
+                                        "Master Recipe: Ingested (${state.parsedRecipe?.editingPlan?.segmentsToKeep?.size ?: 0} scenes ready)"
+                                    } else {
+                                        "Master Recipe: Required (Upload or paste JSON script)"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (state.parsedRecipe != null) TextPrimary else TextSecondary
+                                )
+                            }
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = if (state.isYoutubeUrlValid) Icons.Filled.CheckCircle else Icons.AutoMirrored.Filled.HelpOutline,
+                                    contentDescription = null,
+                                    tint = if (state.isYoutubeUrlValid) EmeraldSuccess else AmberAccent,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (state.isYoutubeUrlValid) {
+                                        "Source Context: Linked for AI reasoning"
+                                    } else {
+                                        "Source Context: Required (Paste video reference link)"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (state.isYoutubeUrlValid) TextPrimary else TextSecondary
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            // Error Message Card
+            // Error Message
             if (state.errorMessage != null) {
                 item {
                     Box(
@@ -628,7 +837,7 @@ fun CreateScreen(
                         .height(54.dp)
                         .testTag("create_submit_button"),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = VioletPrimary,
+                        containerColor = if (state.isRecipeMode) EmeraldSuccess else VioletPrimary,
                         disabledContainerColor = StudioSurfaceElevated
                     ),
                     shape = RoundedCornerShape(12.dp)
@@ -640,14 +849,14 @@ fun CreateScreen(
                     } else {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                Icons.Filled.AutoAwesome,
+                                if (state.isRecipeMode) Icons.Filled.Zap else Icons.Filled.AutoAwesome,
                                 contentDescription = null,
                                 tint = if (state.isReadyToCreate) TextPrimary else TextTertiary,
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "CREATE & OPEN STUDIO",
+                                text = if (state.isRecipeMode) "EXECUTE MASTER RECIPE & EXPORT" else "CREATE & OPEN STUDIO",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = if (state.isReadyToCreate) TextPrimary else TextTertiary
@@ -659,7 +868,11 @@ fun CreateScreen(
                 if (!state.isReadyToCreate && !state.isLoading) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Add both local video and source context URL to start automated production.",
+                        text = if (state.isRecipeMode) {
+                            "Select a local video and upload your Master Recipe JSON to start instant production."
+                        } else {
+                            "Add both local video and source context URL to start automated production."
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = TextTertiary,
                         modifier = Modifier.padding(horizontal = 4.dp)
