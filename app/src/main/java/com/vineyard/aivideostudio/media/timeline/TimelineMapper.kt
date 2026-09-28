@@ -1,13 +1,65 @@
 package com.vineyard.aivideostudio.media.timeline
 
+import com.vineyard.aivideostudio.ai.model.HighlightSegment
 import com.vineyard.aivideostudio.ai.model.TrimSegment
 import com.vineyard.aivideostudio.core.model.PipelineStatus
 import com.vineyard.aivideostudio.core.model.TimeRange
 import com.vineyard.aivideostudio.core.model.TimelineMap
 import com.vineyard.aivideostudio.core.model.TimelineSegment
-import java.util.UUID
 
 object TimelineMapper {
+
+    /**
+     * Updates timeline coordinates when multiple highlight segments are spliced into a montage.
+     */
+    fun applyHighlightSplice(
+        currentMap: TimelineMap,
+        segmentsToKeep: List<HighlightSegment>,
+        stage: PipelineStatus = PipelineStatus.TRIM_EXECUTION
+    ): TimelineMap {
+        if (segmentsToKeep.isEmpty()) return currentMap
+
+        val newRetainedSegments = mutableListOf<TimelineSegment>()
+        val newRemovedRanges = mutableListOf<TimeRange>()
+        var currentCursor = 0.0
+        var segmentCounter = 0
+
+        val sortedKeeps = segmentsToKeep.sortedBy { it.start }
+        var lastEnd = 0.0
+
+        for (keep in sortedKeeps) {
+            if (keep.start > lastEnd) {
+                newRemovedRanges.add(TimeRange(lastEnd, keep.start))
+            }
+            val duration = (keep.end - keep.start).coerceAtLeast(0.1)
+            newRetainedSegments.add(
+                TimelineSegment(
+                    id = "seg_${stage.name.lowercase()}_${segmentCounter++}",
+                    projectId = currentMap.projectId,
+                    originalStart = keep.start,
+                    originalEnd = keep.end,
+                    currentStart = currentCursor,
+                    currentEnd = currentCursor + duration,
+                    isRetained = true,
+                    stageApplied = stage
+                )
+            )
+            currentCursor += duration
+            lastEnd = keep.end
+        }
+
+        if (lastEnd < currentMap.originalDuration) {
+            newRemovedRanges.add(TimeRange(lastEnd, currentMap.originalDuration))
+        }
+
+        return TimelineMap(
+            projectId = currentMap.projectId,
+            originalDuration = currentMap.originalDuration,
+            currentDuration = currentCursor,
+            segments = newRetainedSegments,
+            removedRanges = newRemovedRanges
+        )
+    }
 
     /**
      * Updates an existing timeline map by cutting out the specified trim segments.
@@ -26,12 +78,10 @@ object TimelineMapper {
         var currentCursor = 0.0
         var segmentCounter = 0
 
-        // For each currently retained segment, calculate what portions remain after applying cuts
         for (seg in currentMap.segments.filter { it.isRetained }) {
-            var segStartInCurrent = seg.currentStart
+            val segStartInCurrent = seg.currentStart
             val segEndInCurrent = seg.currentEnd
 
-            // Find all cuts that overlap with this segment in current timeline
             val overlappingCuts = sortedCuts.filter { cut ->
                 cut.end > segStartInCurrent && cut.start < segEndInCurrent
             }
@@ -93,5 +143,29 @@ object TimelineMapper {
             segments = newRetainedSegments,
             removedRanges = newRemovedRanges
         )
+    }
+
+    /**
+     * Translates a timestamp from the original raw video timeline to the current edited montage timeline.
+     */
+    fun mapOriginalToCurrent(timelineMap: TimelineMap, originalSec: Double): Double? {
+        val matchingSegment = timelineMap.segments.firstOrNull {
+            it.isRetained && originalSec >= it.originalStart && originalSec <= it.originalEnd
+        } ?: return null
+
+        val offset = originalSec - matchingSegment.originalStart
+        return matchingSegment.currentStart + offset
+    }
+
+    /**
+     * Translates a timestamp from the current edited montage timeline back to the original raw video timeline.
+     */
+    fun mapCurrentToOriginal(timelineMap: TimelineMap, currentSec: Double): Double? {
+        val matchingSegment = timelineMap.segments.firstOrNull {
+            it.isRetained && currentSec >= it.currentStart && currentSec <= it.currentEnd
+        } ?: return null
+
+        val offset = currentSec - matchingSegment.currentStart
+        return matchingSegment.originalStart + offset
     }
 }
