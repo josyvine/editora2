@@ -24,6 +24,7 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import com.google.common.collect.ImmutableList
+import com.vineyard.aivideostudio.ai.model.HighlightSegment
 import com.vineyard.aivideostudio.core.model.Caption
 import com.vineyard.aivideostudio.core.result.AppError
 import com.vineyard.aivideostudio.core.result.AppResult
@@ -65,6 +66,46 @@ class Media3TransformerEngine(private val context: Context) {
     }
 
     /**
+     * Stitches multiple highlight clips across the video timeline into one continuous highlight montage.
+     */
+    suspend fun spliceHighlightSegments(
+        inputUri: Uri,
+        outputFile: File,
+        segments: List<HighlightSegment>,
+        stripAudio: Boolean = false
+    ): AppResult<File> = withContext(Dispatchers.Main) {
+        outputFile.parentFile?.mkdirs()
+
+        if (segments.isEmpty()) {
+            return@withContext trimVideo(inputUri, outputFile, 0L, 60_000L, stripAudio)
+        }
+
+        val editedMediaItems = segments.map { segment ->
+            val startMs = (segment.start * 1000L).toLong()
+            val endMs = (segment.end * 1000L).toLong()
+
+            val mediaItem = MediaItem.Builder()
+                .setUri(inputUri)
+                .setClippingConfiguration(
+                    MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionMs(startMs)
+                        .setEndPositionMs(endMs)
+                        .build()
+                )
+                .build()
+
+            EditedMediaItem.Builder(mediaItem)
+                .setRemoveAudio(stripAudio)
+                .build()
+        }
+
+        val sequence = EditedMediaItemSequence(editedMediaItems)
+        val composition = Composition.Builder(listOf(sequence)).build()
+
+        runTransformer(composition, outputFile)
+    }
+
+    /**
      * Crops and reframes video using normalized coordinates.
      */
     suspend fun cropVideo(
@@ -78,7 +119,6 @@ class Media3TransformerEngine(private val context: Context) {
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
 
-        // Standard normalized [0, 1] mapped to Media3 Crop [-1, 1]
         val left = (normalizedLeft * 2f) - 1f
         val right = (normalizedRight * 2f) - 1f
         val bottom = (normalizedBottom * 2f) - 1f
@@ -146,10 +186,10 @@ class Media3TransformerEngine(private val context: Context) {
             "9:16" -> videoEffects.add(Presentation.createForAspectRatio(9f / 16f, Presentation.LAYOUT_SCALE_TO_FIT))
             "16:9" -> videoEffects.add(Presentation.createForAspectRatio(16f / 9f, Presentation.LAYOUT_SCALE_TO_FIT))
             "1:1" -> videoEffects.add(Presentation.createForAspectRatio(1f, Presentation.LAYOUT_SCALE_TO_FIT))
-            else -> {} // Keep original aspect ratio
+            else -> {}
         }
 
-        // 2. Pronounced Zoom Punch-In Effect (noticeable 1.25x – 1.35x scaling)
+        // 2. Pronounced Zoom Punch-In Effect (noticeable 1.15x – 1.30x scaling)
         if (zoomScale > 1.0f) {
             videoEffects.add(
                 ScaleAndRotateTransformation.Builder()
@@ -289,9 +329,6 @@ class Media3TransformerEngine(private val context: Context) {
             if (activeCaption != null && activeCaption.text.isNotBlank()) {
                 val posX = if (activeCaption.x > 1.0f) activeCaption.x / 100f else activeCaption.x
 
-                // Lower-third subtitle anchoring:
-                // Native subtitles on vertical video sit between 0.88 and 0.93.
-                // Anchoring lower-third captions directly to 0.90f ensures the concealer mask blankets the original text precisely.
                 val rawY = if (activeCaption.y > 1.0f) activeCaption.y / 100f else activeCaption.y
                 val targetY = if (rawY in 0.75f..0.96f) 0.90f else rawY
 
@@ -318,7 +355,6 @@ class Media3TransformerEngine(private val context: Context) {
                     textPaint.color = Color.WHITE
                 }
 
-                // 1. DYNAMIC MULTILINE SENTENCE WRAPPING
                 val maxTextWidth = targetWidth * 0.76f
                 val words = activeCaption.text.split(" ")
                 val lines = mutableListOf<String>()
@@ -346,10 +382,9 @@ class Media3TransformerEngine(private val context: Context) {
                 val totalTextHeight = lines.size * lineHeight
                 val longestLineWidth = lines.maxOfOrNull { textPaint.measureText(it) } ?: maxTextWidth
 
-                // 2. INTELLIGENT ORIGINAL SUBTITLE CONCEALER MASK
                 val padH = 36f
                 val padV = 20f
-                val minConcealerWidth = targetWidth * 0.82f // Blankets the full lower-third subtitle area
+                val minConcealerWidth = targetWidth * 0.82f
                 val maskWidth = maxOf(longestLineWidth + (padH * 2), minConcealerWidth)
 
                 val pillRect = RectF(
@@ -359,22 +394,20 @@ class Media3TransformerEngine(private val context: Context) {
                     y + (totalTextHeight / 2f) + padV
                 )
 
-                // Render solid 100% opaque mask to conceal original hardcoded text
                 val bgHex = activeCaption.backgroundColorHex
                 backgroundPillPaint.color = try {
                     if (!bgHex.isNullOrBlank() && bgHex != "#00000000") {
                         Color.parseColor(bgHex)
                     } else {
-                        Color.BLACK // Solid black cover ensures total concealment
+                        Color.BLACK
                     }
                 } catch (_: Exception) {
                     Color.BLACK
                 }
-                backgroundPillPaint.alpha = 255 // Strictly 100% opaque
+                backgroundPillPaint.alpha = 255
 
                 canvas.drawRoundRect(pillRect, 22f, 22f, backgroundPillPaint)
 
-                // 3. Draw each line centered over the opaque mask
                 val startY = y - (totalTextHeight / 2f) + scaledFontSize * 0.85f
                 for ((lineIdx, lineText) in lines.withIndex()) {
                     val lineY = startY + (lineIdx * lineHeight)
