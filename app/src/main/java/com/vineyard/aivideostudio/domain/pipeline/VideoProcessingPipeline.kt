@@ -29,6 +29,11 @@ import com.vineyard.aivideostudio.core.model.QaVerdict
 import com.vineyard.aivideostudio.core.model.StepStatus
 import com.vineyard.aivideostudio.core.model.TimelineMap
 import com.vineyard.aivideostudio.core.model.TranscriptSegment
+import com.vineyard.aivideostudio.core.model.effects.BlurSpec
+import com.vineyard.aivideostudio.core.model.effects.ColorGradeSpec
+import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
+import com.vineyard.aivideostudio.core.model.effects.SpeedRampSpec
+import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 import com.vineyard.aivideostudio.core.result.AppError
 import com.vineyard.aivideostudio.core.result.AppResult
 import com.vineyard.aivideostudio.core.util.JsonUtils
@@ -532,7 +537,87 @@ class VideoProcessingPipeline(
         var currentVideoUri = project.sourceUri
         var currentDuration = project.metadata.durationSeconds
 
-        // 1. SPLICE HIGHLIGHTS
+        // 0. AUDIO-ONLY MODE FAST PATH: Keeps video frames 100% untouched
+        if (recipe.audioOnlyMode) {
+            logger.log(projectId, PipelineStatus.SOURCE_ANALYSIS, "Audio-Only Mode active: Video frames remain 100% intact.", LogSeverity.INFO)
+            onStageChanged(PipelineStatus.TTS_GENERATION, "Synthesizing voiceover narration track")
+            recordStep(projectId, PipelineStatus.TTS_GENERATION, StepStatus.IN_PROGRESS, "Synthesizing Audio Track")
+
+            var commentaryAudioOutputFile: File? = null
+            if (recipe.commentary.fullScript.isNotBlank()) {
+                val livePcmFile = storageManager.createAudioOutputFile(projectId, "commentary_live_raw.pcm")
+                val liveM4aFile = storageManager.createAudioOutputFile(projectId, "commentary_live.m4a")
+
+                val liveResult = liveCommentatorManager.generateLiveCommentary(
+                    scriptText = recipe.commentary.fullScript,
+                    personaPrompt = recipe.commentary.tone ?: "Professional clear studio voiceover.",
+                    outputPcmFile = livePcmFile
+                )
+
+                if (liveResult is AppResult.Success && livePcmFile.exists() && livePcmFile.length() > 0L) {
+                    val conversionResult = pcmToM4aConverter.convert(livePcmFile, liveM4aFile, 24_000)
+                    if (conversionResult is AppResult.Success) {
+                        commentaryAudioOutputFile = liveM4aFile
+                    }
+                }
+
+                if (commentaryAudioOutputFile == null) {
+                    val fallbackFile = storageManager.createAudioOutputFile(projectId, "commentary_fallback.m4a")
+                    val fallbackRes = ttsEngine.synthesizeSpeech(
+                        TtsRequest(
+                            text = recipe.commentary.fullScript,
+                            voiceName = recipe.commentary.voiceName ?: "Puck",
+                            outputFilePath = fallbackFile.absolutePath
+                        )
+                    )
+                    if (fallbackRes.success) {
+                        commentaryAudioOutputFile = fallbackFile
+                    }
+                }
+            }
+
+            val captionsToSave = recipe.captions.mapIndexed { idx, cap -> cap.toCaption(projectId, idx) }
+            projectRepository.saveCaptions(projectId, captionsToSave)
+
+            onStageChanged(PipelineStatus.EXPORTING, "Replacing audio track on original video stream")
+            recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.IN_PROGRESS, "Exporting Audio-Replaced Video")
+
+            val finalOutputFile = storageManager.createFinalOutputFile(projectId)
+            val exportResult = transformerEngine.exportVideo(
+                inputUri = Uri.parse(currentVideoUri),
+                outputFile = finalOutputFile,
+                commentaryAudioUri = commentaryAudioOutputFile?.let { Uri.fromFile(it) },
+                stripOriginalAudio = true,
+                captions = captionsToSave,
+                targetAspectRatio = "ORIGINAL",
+                zoomScale = 1.0f
+            )
+
+            val finalVideoUri = when (exportResult) {
+                is AppResult.Success -> {
+                    val uriStr = Uri.fromFile(finalOutputFile).toString()
+                    projectRepository.updateCurrentVideoUri(projectId, uriStr)
+                    uriStr
+                }
+                is AppResult.Error -> currentVideoUri
+            }
+
+            projectRepository.markCompleted(projectId, finalVideoUri)
+            recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.COMPLETED, "Audio Replacement complete")
+            onStageChanged(PipelineStatus.COMPLETED, "Audio-Only Production complete! Video ready.")
+
+            val updatedProject = projectRepository.getProjectById(projectId) ?: project
+            return@withContext AppResult.Success(updatedProject)
+        }
+
+        // 1. EXTRACT NEW ADVANCED JSON TOOLS
+        val speedSpecs = recipe.editingPlan.speedAdjustments.map { it.toSpeedRampSpec() }
+        val blurSpecs = recipe.editingPlan.blurEffects.map { it.toBlurSpec() }
+        val replacementSpecs = recipe.editingPlan.replacementOverlays.mapIndexed { idx, dto -> dto.toReplacementOverlaySpec(idx) }
+        val colorGradeSpec = recipe.editingPlan.colorGrade?.toColorGradeSpec()
+        val trackingSpecs = recipe.editingPlan.trackingIndicators.mapIndexed { idx, dto -> dto.toTrackingIndicatorSpec(idx) }
+
+        // 2. SPLICE HIGHLIGHTS
         val highlightSegments = recipe.editingPlan.segmentsToKeep.map { it.toHighlightSegment() }
         if (highlightSegments.isNotEmpty()) {
             onStageChanged(PipelineStatus.TRIM_EXECUTION, "Media3 assembling ${highlightSegments.size} highlight scenes")
@@ -554,7 +639,7 @@ class VideoProcessingPipeline(
             }
         }
 
-        // 2. CROP / REFRAME
+        // 3. CROP / REFRAME
         val crop = recipe.editingPlan.crop
         if (crop != null && crop.isNecessary && (crop.x > 0f || crop.y > 0f || crop.width < 1f || crop.height < 1f)) {
             onStageChanged(PipelineStatus.CROP_EXECUTION, "Media3 applying reframing crop")
@@ -578,7 +663,7 @@ class VideoProcessingPipeline(
             }
         }
 
-        // 3. ZOOM PUNCH-IN
+        // 4. ZOOM PUNCH-IN
         val zoom = recipe.editingPlan.zoom
         val zoomScale = if (zoom != null && zoom.isNecessary && zoom.scale > 1.05f) zoom.scale else 1.25f
         if (zoomScale > 1.05f) {
@@ -600,12 +685,12 @@ class VideoProcessingPipeline(
             }
         }
 
-        // 4. CAPTIONS
+        // 5. CAPTIONS
         val captionsToSave = recipe.captions.mapIndexed { idx, cap -> cap.toCaption(projectId, idx) }
         projectRepository.saveCaptions(projectId, captionsToSave)
         recordStep(projectId, PipelineStatus.CAPTION_ANALYSIS, StepStatus.COMPLETED, "${captionsToSave.size} captions configured")
 
-        // 5. TTS COMMENTARY SYNTHESIS
+        // 6. TTS COMMENTARY SYNTHESIS
         var commentaryAudioOutputFile: File? = null
         if (recipe.commentary.fullScript.isNotBlank()) {
             onStageChanged(PipelineStatus.TTS_GENERATION, "Synthesizing voiceover commentary from Master Recipe")
@@ -655,8 +740,8 @@ class VideoProcessingPipeline(
             recordStep(projectId, PipelineStatus.TTS_GENERATION, StepStatus.COMPLETED, "Voiceover audio ready")
         }
 
-        // 6. FINAL PRODUCTION EXPORT
-        onStageChanged(PipelineStatus.EXPORTING, "Rendering final transformed video with burned-in subtitles")
+        // 7. FINAL PRODUCTION EXPORT (APPLYING ADVANCED TOOLS & SHADERS)
+        onStageChanged(PipelineStatus.EXPORTING, "Rendering video with color filters, blurs, and overlays")
         recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.IN_PROGRESS, "Exporting final video")
 
         val finalOutputFile = storageManager.createFinalOutputFile(projectId)
@@ -667,7 +752,12 @@ class VideoProcessingPipeline(
             stripOriginalAudio = true,
             captions = captionsToSave,
             targetAspectRatio = recipe.projectInfo?.targetAspectRatio ?: project.targetAspectRatio,
-            zoomScale = zoomScale
+            zoomScale = zoomScale,
+            speedRamps = speedSpecs,
+            blurSpecs = blurSpecs,
+            replacementOverlays = replacementSpecs,
+            colorGrade = colorGradeSpec,
+            trackingIndicators = trackingSpecs
         )
 
         val finalVideoUri = when (exportResult) {
