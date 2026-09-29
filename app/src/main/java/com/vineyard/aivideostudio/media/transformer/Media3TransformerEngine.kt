@@ -266,7 +266,7 @@ class Media3TransformerEngine(private val context: Context) {
             val f = File(path)
             f.exists() && f.length() > 0L
         } catch (_: Exception) {
-            true // If content URI, allow Media3 to resolve
+            true
         }
 
         val composition = if (isCommentaryAudioValid && commentaryAudioUri != null) {
@@ -400,7 +400,7 @@ class Media3TransformerEngine(private val context: Context) {
                         continuation.resume(AppResult.Success(outputFile))
                     } else {
                         continuation.resume(
-                            AppResult.Error(AppError.MediaProcessingError("Transformer finished but output file is empty."))
+                            AppResult.Error(AppError.MediaProcessingError("Transformer finished but output file is empty (0 bytes)."))
                         )
                     }
                 }
@@ -412,11 +412,20 @@ class Media3TransformerEngine(private val context: Context) {
                 exportException: ExportException
             ) {
                 if (continuation.isActive) {
+                    // Deep Unpack of Media3 Diagnostic Details & Stacktrace
+                    val errorCode = exportException.errorCode
+                    val errorCodeName = exportException.errorCodeName
+                    val underlyingCause = exportException.cause?.message ?: "None"
+                    val fullStackTrace = exportException.stackTraceToString()
+
+                    val deepDiagnosticMessage = "Media3 Export Failed [$errorCodeName / Code: $errorCode]: " +
+                            "${exportException.message} | Cause: $underlyingCause\nStackTrace: $fullStackTrace"
+
                     continuation.resume(
                         AppResult.Error(
                             AppError.MediaProcessingError(
-                                "Media3 transformation failed: ${exportException.message}",
-                                exportException
+                                message = deepDiagnosticMessage,
+                                cause = exportException
                             )
                         )
                     )
@@ -432,9 +441,13 @@ class Media3TransformerEngine(private val context: Context) {
             activeTransformer.start(composition, outputFile.absolutePath)
         } catch (e: Exception) {
             if (continuation.isActive) {
+                val fullStackTrace = e.stackTraceToString()
                 continuation.resume(
                     AppResult.Error(
-                        AppError.MediaProcessingError("Failed starting Media3 Transformer: ${e.message}", e)
+                        AppError.MediaProcessingError(
+                            message = "Failed starting Media3 Transformer: ${e.message}\nStackTrace: $fullStackTrace",
+                            cause = e
+                        )
                     )
                 )
             }
