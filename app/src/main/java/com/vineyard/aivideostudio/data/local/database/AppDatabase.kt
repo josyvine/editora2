@@ -46,7 +46,7 @@ import com.vineyard.aivideostudio.data.local.database.entity.VoiceEntity
         VoiceEntity::class,
         PersistentLogEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
