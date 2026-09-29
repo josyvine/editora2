@@ -2,6 +2,7 @@ package com.vineyard.aivideostudio.core.util
 
 import android.content.ContentValues
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -31,11 +32,38 @@ object StorageUtils {
     }
 
     /**
-     * Saves a video file into the public device storage (Movies/Editora) using MediaStore.
-     * Instantly visible in Gallery, Photos, and Media Players.
+     * Validates that a file is a valid, readable video before exporting to public storage.
+     */
+    private fun validateSourceVideoFile(sourceFile: File): AppResult<Unit> {
+        if (!sourceFile.exists()) {
+            return AppResult.Error(AppError.StorageError("Source video file does not exist on disk."))
+        }
+        if (sourceFile.length() < 1024L) {
+            return AppResult.Error(AppError.StorageError("Source video file is corrupted or empty (${sourceFile.length()} bytes)."))
+        }
+
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(sourceFile.absolutePath)
+            val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+            if (hasVideo == null) {
+                AppResult.Error(AppError.StorageError("File does not contain a valid video stream."))
+            } else {
+                AppResult.Success(Unit)
+            }
+        } catch (e: Exception) {
+            AppResult.Error(AppError.StorageError("Invalid video header: ${e.message}"))
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Saves the final transformed MP4 video file into public device storage (Movies/Editora) using MediaStore.
+     * Instantly visible in Gallery, Photos, and Media Players with replaced AI soundtrack.
      *
      * @param context Application context
-     * @param sourceFile The internal sandboxed video file to export
+     * @param sourceFile The finalized MP4 video file
      * @param displayName Desired name for the video file
      */
     fun saveVideoToGallery(
@@ -43,9 +71,8 @@ object StorageUtils {
         sourceFile: File,
         displayName: String = "Editora_${System.currentTimeMillis()}.mp4"
     ): AppResult<Uri> {
-        if (!sourceFile.exists() || sourceFile.length() == 0L) {
-            return AppResult.Error(AppError.StorageError("Source video file does not exist or is empty."))
-        }
+        val validation = validateSourceVideoFile(sourceFile)
+        if (validation is AppResult.Error) return validation
 
         return try {
             val cleanName = if (displayName.endsWith(".mp4", ignoreCase = true)) displayName else "$displayName.mp4"
@@ -72,7 +99,7 @@ object StorageUtils {
 
             contentResolver.openOutputStream(uri)?.use { outputStream ->
                 FileInputStream(sourceFile).use { inputStream ->
-                    inputStream.copyTo(outputStream)
+                    inputStream.copyTo(outputStream, bufferSize = 65536)
                 }
                 outputStream.flush()
             } ?: return AppResult.Error(AppError.StorageError("Failed to open output stream to MediaStore URI."))
@@ -90,7 +117,7 @@ object StorageUtils {
     }
 
     /**
-     * Saves a video file into a custom directory selected via Storage Access Framework (SAF Tree Uri).
+     * Saves the final video into a custom directory selected via Storage Access Framework (SAF Tree Uri).
      */
     fun saveVideoToTreeUri(
         context: Context,
@@ -98,9 +125,8 @@ object StorageUtils {
         treeUri: Uri,
         displayName: String = "Editora_${System.currentTimeMillis()}.mp4"
     ): AppResult<Uri> {
-        if (!sourceFile.exists() || sourceFile.length() == 0L) {
-            return AppResult.Error(AppError.StorageError("Source video file does not exist or is empty."))
-        }
+        val validation = validateSourceVideoFile(sourceFile)
+        if (validation is AppResult.Error) return validation
 
         return try {
             val cleanName = if (displayName.endsWith(".mp4", ignoreCase = true)) displayName else "$displayName.mp4"
@@ -116,7 +142,7 @@ object StorageUtils {
 
             context.contentResolver.openOutputStream(targetUri)?.use { outputStream ->
                 FileInputStream(sourceFile).use { inputStream ->
-                    inputStream.copyTo(outputStream)
+                    inputStream.copyTo(outputStream, bufferSize = 65536)
                 }
                 outputStream.flush()
             } ?: return AppResult.Error(AppError.StorageError("Failed writing video to destination folder."))
@@ -135,14 +161,13 @@ object StorageUtils {
         sourceFile: File,
         targetUri: Uri
     ): AppResult<Uri> {
-        if (!sourceFile.exists() || sourceFile.length() == 0L) {
-            return AppResult.Error(AppError.StorageError("Source video file does not exist or is empty."))
-        }
+        val validation = validateSourceVideoFile(sourceFile)
+        if (validation is AppResult.Error) return validation
 
         return try {
             context.contentResolver.openOutputStream(targetUri)?.use { outputStream ->
                 FileInputStream(sourceFile).use { inputStream ->
-                    inputStream.copyTo(outputStream)
+                    inputStream.copyTo(outputStream, bufferSize = 65536)
                 }
                 outputStream.flush()
             } ?: return AppResult.Error(AppError.StorageError("Failed writing video to destination URI."))
