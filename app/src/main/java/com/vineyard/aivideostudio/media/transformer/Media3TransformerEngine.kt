@@ -8,8 +8,10 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
+import androidx.annotation.OptIn
 import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.Crop
 import androidx.media3.effect.OverlayEffect
@@ -26,14 +28,23 @@ import androidx.media3.transformer.Transformer
 import com.google.common.collect.ImmutableList
 import com.vineyard.aivideostudio.ai.model.HighlightSegment
 import com.vineyard.aivideostudio.core.model.Caption
+import com.vineyard.aivideostudio.core.model.effects.BlurSpec
+import com.vineyard.aivideostudio.core.model.effects.ColorGradeSpec
+import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
+import com.vineyard.aivideostudio.core.model.effects.SpeedRampSpec
+import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 import com.vineyard.aivideostudio.core.result.AppError
 import com.vineyard.aivideostudio.core.result.AppResult
+import com.vineyard.aivideostudio.media.transformer.effects.BlurGlEffect
+import com.vineyard.aivideostudio.media.transformer.effects.ColorFilterGlEffect
+import com.vineyard.aivideostudio.media.transformer.overlays.DynamicGraphicsOverlay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
 
+@OptIn(UnstableApi::class)
 class Media3TransformerEngine(private val context: Context) {
 
     /**
@@ -162,11 +173,12 @@ class Media3TransformerEngine(private val context: Context) {
     }
 
     /**
-     * Comprehensive final export pass:
-     * 1. Strips copyrighted source audio track.
-     * 2. Injects the replacement commentary audio file (M4A/AAC) as primary soundtrack.
-     * 3. Burns subtitle captions directly over original subtitles with seamless concealing.
-     * 4. Applies target aspect ratio reframing and noticeable zoom punch-in.
+     * Comprehensive production export pass:
+     * 1. Strips copyrighted source audio track and mixes replacement commentary audio (M4A/AAC).
+     * 2. Burns subtitle captions with lower-third concealer pill masks.
+     * 3. Applies Aspect Ratio reframing and Zoom punch-in.
+     * 4. Applies GPU Shaders: Selective Gaussian/Mosaic Blur and Cinematic Color Grading.
+     * 5. Renders Dynamic Overlays: 1:1 Brand Watermark Cover/Emoji Replacer & Sports Motion Tracking.
      */
     suspend fun exportVideo(
         inputUri: Uri,
@@ -175,7 +187,12 @@ class Media3TransformerEngine(private val context: Context) {
         stripOriginalAudio: Boolean = true,
         captions: List<Caption> = emptyList(),
         targetAspectRatio: String = "ORIGINAL",
-        zoomScale: Float = 1.0f
+        zoomScale: Float = 1.0f,
+        speedRamps: List<SpeedRampSpec> = emptyList(),
+        blurSpecs: List<BlurSpec> = emptyList(),
+        replacementOverlays: List<ReplacementOverlaySpec> = emptyList(),
+        colorGrade: ColorGradeSpec? = null,
+        trackingIndicators: List<TrackingIndicatorSpec> = emptyList()
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
 
@@ -189,7 +206,7 @@ class Media3TransformerEngine(private val context: Context) {
             else -> {}
         }
 
-        // 2. Pronounced Zoom Punch-In Effect (noticeable 1.15x – 1.30x scaling)
+        // 2. Pronounced Zoom Punch-In Effect
         if (zoomScale > 1.0f) {
             videoEffects.add(
                 ScaleAndRotateTransformation.Builder()
@@ -198,13 +215,32 @@ class Media3TransformerEngine(private val context: Context) {
             )
         }
 
-        // 3. Caption Burn-In with Multiline Wrapping and Concealer Masking
-        if (captions.isNotEmpty()) {
-            val captionOverlay: TextureOverlay = SubtitleBitmapOverlay(captions)
-            videoEffects.add(OverlayEffect(ImmutableList.of(captionOverlay)))
+        // 3. Selective Gaussian / Mosaic Blur Shader
+        if (blurSpecs.isNotEmpty()) {
+            videoEffects.add(BlurGlEffect(blurSpecs))
         }
 
-        // 4. Construct Video Sequence with Audio Removal
+        // 4. Color Grading & Filter Shader
+        if (colorGrade != null) {
+            videoEffects.add(ColorFilterGlEffect(colorGrade))
+        }
+
+        // 5. Texture & Canvas Overlays (Captions, 1:1 Emoji Covers, Sports Tracking Boxes)
+        val overlayList = mutableListOf<TextureOverlay>()
+
+        if (captions.isNotEmpty()) {
+            overlayList.add(SubtitleBitmapOverlay(captions))
+        }
+
+        if (replacementOverlays.isNotEmpty() || trackingIndicators.isNotEmpty()) {
+            overlayList.add(DynamicGraphicsOverlay(replacementOverlays, trackingIndicators))
+        }
+
+        if (overlayList.isNotEmpty()) {
+            videoEffects.add(OverlayEffect(ImmutableList.copyOf(overlayList)))
+        }
+
+        // 6. Construct Video Sequence with Effects
         val videoMediaItem = MediaItem.fromUri(inputUri)
         val editedVideoItem = EditedMediaItem.Builder(videoMediaItem)
             .setRemoveAudio(stripOriginalAudio)
@@ -212,7 +248,7 @@ class Media3TransformerEngine(private val context: Context) {
             .build()
         val videoSequence = EditedMediaItemSequence(editedVideoItem)
 
-        // 5. Construct Multi-Track Composition (Inject Replacement Commentary Track)
+        // 7. Construct Multi-Track Composition (Inject Replacement Commentary Track)
         val composition = if (commentaryAudioUri != null) {
             val audioMediaItem = MediaItem.fromUri(commentaryAudioUri)
             val editedAudioItem = EditedMediaItem.Builder(audioMediaItem)
