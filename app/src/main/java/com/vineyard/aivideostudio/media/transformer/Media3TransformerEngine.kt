@@ -60,6 +60,7 @@ class Media3TransformerEngine(private val context: Context) {
         stripAudio: Boolean = false
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) outputFile.delete()
 
         val mediaItem = MediaItem.Builder()
             .setUri(inputUri)
@@ -88,6 +89,7 @@ class Media3TransformerEngine(private val context: Context) {
         stripAudio: Boolean = false
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) outputFile.delete()
 
         if (segments.isEmpty()) {
             return@withContext trimVideo(inputUri, outputFile, 0L, 60_000L, stripAudio)
@@ -131,6 +133,7 @@ class Media3TransformerEngine(private val context: Context) {
         stripAudio: Boolean = false
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) outputFile.delete()
 
         val left = (normalizedLeft * 2f) - 1f
         val right = (normalizedRight * 2f) - 1f
@@ -159,6 +162,7 @@ class Media3TransformerEngine(private val context: Context) {
         stripAudio: Boolean = false
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) outputFile.delete()
 
         val scaleEffect = ScaleAndRotateTransformation.Builder()
             .setScale(scale, scale)
@@ -176,12 +180,9 @@ class Media3TransformerEngine(private val context: Context) {
 
     /**
      * Comprehensive production export pass:
-     * 1. Slices video into speed-ramped sub-segments via Media3 SpeedChangeEffect.
-     * 2. Strips copyrighted source audio track and mixes replacement commentary audio (M4A/AAC).
-     * 3. Burns subtitle captions with lower-third concealer pill masks.
-     * 4. Applies Aspect Ratio reframing and Zoom punch-in.
-     * 5. Applies GPU Shaders: Selective Gaussian/Mosaic Blur and Cinematic Color Grading.
-     * 6. Renders Dynamic Overlays: 1:1 Brand Watermark Cover/Emoji Replacer & Sports Motion Tracking.
+     * 1. Purges original copyrighted audio track from all video segments.
+     * 2. Muxes synthesized TTS audio track as the sole soundtrack.
+     * 3. Applies hardware-accelerated Speed Ramping, GPU Shaders, and dynamic Canvas Overlays.
      */
     suspend fun exportVideo(
         inputUri: Uri,
@@ -198,6 +199,7 @@ class Media3TransformerEngine(private val context: Context) {
         trackingIndicators: List<TrackingIndicatorSpec> = emptyList()
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) outputFile.delete()
 
         val sharedVideoEffects = mutableListOf<Effect>()
 
@@ -209,7 +211,7 @@ class Media3TransformerEngine(private val context: Context) {
             else -> {}
         }
 
-        // 2. Pronounced Zoom Punch-In Effect
+        // 2. Zoom Punch-In Effect
         if (zoomScale > 1.0f) {
             sharedVideoEffects.add(
                 ScaleAndRotateTransformation.Builder()
@@ -223,12 +225,12 @@ class Media3TransformerEngine(private val context: Context) {
             sharedVideoEffects.add(BlurGlEffect(blurSpecs))
         }
 
-        // 4. Color Grading & Filter Shader
+        // 4. Color Grading Shader
         if (colorGrade != null) {
             sharedVideoEffects.add(ColorFilterGlEffect(colorGrade))
         }
 
-        // 5. Texture & Canvas Overlays (Captions, 1:1 Emoji Covers, Sports Tracking Boxes)
+        // 5. Overlays (Captions & Dynamic Graphics)
         val overlayList = mutableListOf<TextureOverlay>()
 
         if (captions.isNotEmpty()) {
@@ -243,20 +245,31 @@ class Media3TransformerEngine(private val context: Context) {
             sharedVideoEffects.add(OverlayEffect(ImmutableList.copyOf(overlayList)))
         }
 
-        // 6. Build Video Sequence (Multi-Segment Speed Ramping or Single Stream)
+        // Strict audio enforcement: If replacement commentary is provided, force strip original audio
+        val shouldStripAudio = stripOriginalAudio || (commentaryAudioUri != null)
+
+        // 6. Build Video Sequence
         val videoSequence = if (speedRamps.isNotEmpty()) {
-            buildSpeedRampedSequence(inputUri, stripOriginalAudio, speedRamps, sharedVideoEffects)
+            buildSpeedRampedSequence(inputUri, shouldStripAudio, speedRamps, sharedVideoEffects)
         } else {
             val videoMediaItem = MediaItem.fromUri(inputUri)
             val editedVideoItem = EditedMediaItem.Builder(videoMediaItem)
-                .setRemoveAudio(stripOriginalAudio)
+                .setRemoveAudio(shouldStripAudio)
                 .setEffects(Effects(emptyList(), sharedVideoEffects))
                 .build()
             EditedMediaItemSequence(editedVideoItem)
         }
 
-        // 7. Construct Multi-Track Composition (Inject Replacement Commentary Track)
-        val composition = if (commentaryAudioUri != null) {
+        // 7. Validate & Inject Replacement TTS Commentary Audio Track
+        val isCommentaryAudioValid = commentaryAudioUri != null && try {
+            val path = commentaryAudioUri.path ?: ""
+            val f = File(path)
+            f.exists() && f.length() > 0L
+        } catch (_: Exception) {
+            true // If content URI, allow Media3 to resolve
+        }
+
+        val composition = if (isCommentaryAudioValid && commentaryAudioUri != null) {
             val audioMediaItem = MediaItem.fromUri(commentaryAudioUri)
             val editedAudioItem = EditedMediaItem.Builder(audioMediaItem)
                 .setRemoveVideo(true)
@@ -272,8 +285,8 @@ class Media3TransformerEngine(private val context: Context) {
     }
 
     /**
-     * Slices the video into seamless contiguous intervals across the timeline,
-     * applying Media3 SpeedChangeEffect on accelerated sections (e.g., 2.0x typing/scrolling).
+     * Slices the video into contiguous intervals across the timeline,
+     * applying Media3 SpeedChangeEffect on accelerated sections.
      */
     private fun buildSpeedRampedSequence(
         inputUri: Uri,
@@ -290,13 +303,13 @@ class Media3TransformerEngine(private val context: Context) {
             val rampStart = ramp.startTimeMs.coerceIn(0L, totalDurationMs)
             val rampEnd = ramp.endTimeMs.coerceIn(rampStart, totalDurationMs)
 
-            // 1. Add normal speed interval (1.0x) prior to ramp
+            // Add normal speed interval (1.0x) prior to ramp
             if (rampStart > cursorMs) {
                 val normalItem = createSegmentItem(inputUri, cursorMs, rampStart, 1.0f, stripAudio, sharedEffects)
                 editedItems.add(normalItem)
             }
 
-            // 2. Add accelerated speed interval (e.g. 1.75x or 2.0x)
+            // Add accelerated interval
             if (rampEnd > rampStart) {
                 val fastItem = createSegmentItem(inputUri, rampStart, rampEnd, ramp.speedMultiplier, stripAudio, sharedEffects)
                 editedItems.add(fastItem)
@@ -305,7 +318,7 @@ class Media3TransformerEngine(private val context: Context) {
             cursorMs = rampEnd
         }
 
-        // 3. Add trailing normal speed interval (1.0x) to the end of the video
+        // Add trailing normal speed interval
         if (cursorMs < totalDurationMs) {
             val trailingItem = createSegmentItem(inputUri, cursorMs, totalDurationMs, 1.0f, stripAudio, sharedEffects)
             editedItems.add(trailingItem)
@@ -383,7 +396,13 @@ class Media3TransformerEngine(private val context: Context) {
         val listener = object : Transformer.Listener {
             override fun onCompleted(comp: Composition, exportResult: ExportResult) {
                 if (continuation.isActive) {
-                    continuation.resume(AppResult.Success(outputFile))
+                    if (outputFile.exists() && outputFile.length() > 0L) {
+                        continuation.resume(AppResult.Success(outputFile))
+                    } else {
+                        continuation.resume(
+                            AppResult.Error(AppError.MediaProcessingError("Transformer finished but output file is empty."))
+                        )
+                    }
                 }
             }
 
