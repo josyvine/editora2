@@ -12,6 +12,7 @@ data class ProjectEntity(
     val sourcePath: String,
     val currentVideoUri: String,
     val sourceYoutubeUrl: String? = null,
+    val masterRecipeJson: String? = null, // Ingested Master Recipe JSON
     val finalVideoUri: String?,
     val thumbnailUri: String?,
     val durationSeconds: Double,
