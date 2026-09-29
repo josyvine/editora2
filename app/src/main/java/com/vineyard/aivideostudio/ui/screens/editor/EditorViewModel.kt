@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.vineyard.aivideostudio.core.model.ArtifactType
 import com.vineyard.aivideostudio.core.model.Caption
 import com.vineyard.aivideostudio.core.model.CommentarySegment
 import com.vineyard.aivideostudio.core.model.MediaArtifact
@@ -129,28 +130,52 @@ class EditorViewModel(
 
     /**
      * Resolves the video file to be saved.
-     * Prioritizes the final rendered MP4 (which contains purged audio & burned subtitles).
+     * STRICT RULE: Strictly returns the finalized MP4 containing the burned TTS audio.
+     * Never falls back to un-muxed raw source files.
      */
     private fun resolveCurrentVideoFile(state: EditorUiState): File? {
-        val uriStr = state.project?.finalVideoUri?.takeIf { it.isNotBlank() }
-            ?: state.project?.currentVideoUri?.takeIf { it.isNotBlank() }
-            ?: return null
-
-        val file = if (uriStr.startsWith("file://")) {
-            File(Uri.parse(uriStr).path ?: "")
-        } else {
-            File(uriStr)
+        // 1. Prioritize strictly project.finalVideoUri
+        val finalUriStr = state.project?.finalVideoUri?.takeIf { it.isNotBlank() }
+        if (finalUriStr != null) {
+            val file = parseUriToFile(finalUriStr)
+            if (file != null && file.exists() && file.length() > 0L) {
+                return file
+            }
         }
-        if (file.exists() && file.length() > 0L) return file
 
-        // Fallback: Check media artifacts for final exported file
+        // 2. Check media artifacts explicitly for FINAL_VIDEO
         val finalArtifact = state.artifacts.firstOrNull {
+            it.type == ArtifactType.FINAL_VIDEO &&
             it.filePath.isNotBlank() &&
             File(it.filePath).exists() &&
-            (it.stage.name.contains("EXPORT") || it.stage.name.contains("COMPLETE"))
-        } ?: state.artifacts.firstOrNull { it.filePath.isNotBlank() && File(it.filePath).exists() }
+            File(it.filePath).length() > 0L
+        } ?: state.artifacts.firstOrNull {
+            (it.stage.name.contains("EXPORT") || it.stage.name.contains("COMPLET")) &&
+            it.filePath.isNotBlank() &&
+            File(it.filePath).exists() &&
+            File(it.filePath).length() > 0L
+        }
 
-        return finalArtifact?.let { File(it.filePath) }
+        if (finalArtifact != null) {
+            return File(finalArtifact.filePath)
+        }
+
+        // 3. If finalVideoUri is absent, reject export of raw video to prevent original audio leakage
+        return null
+    }
+
+    private fun parseUriToFile(uriStr: String): File? {
+        return try {
+            if (uriStr.startsWith("file://")) {
+                File(Uri.parse(uriStr).path ?: "")
+            } else if (uriStr.startsWith("/")) {
+                File(uriStr)
+            } else {
+                File(Uri.parse(uriStr).path ?: uriStr)
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /**
@@ -160,7 +185,7 @@ class EditorViewModel(
         val state = uiState.value
         val file = resolveCurrentVideoFile(state)
         if (file == null || !file.exists()) {
-            _exportErrorMessage.value = "Final video file not found in storage."
+            _exportErrorMessage.value = "Final video with AI voiceover is not ready. Please wait for pipeline export to complete."
             return
         }
 
@@ -198,7 +223,7 @@ class EditorViewModel(
         val state = uiState.value
         val file = resolveCurrentVideoFile(state)
         if (file == null || !file.exists()) {
-            _exportErrorMessage.value = "Final video file not found in storage."
+            _exportErrorMessage.value = "Final video with AI voiceover is not ready. Please wait for pipeline export to complete."
             return
         }
 
@@ -237,7 +262,7 @@ class EditorViewModel(
         val state = uiState.value
         val file = resolveCurrentVideoFile(state)
         if (file == null || !file.exists()) {
-            _exportErrorMessage.value = "Final video file not found in storage."
+            _exportErrorMessage.value = "Final video with AI voiceover is not ready. Please wait for pipeline export to complete."
             return
         }
 
