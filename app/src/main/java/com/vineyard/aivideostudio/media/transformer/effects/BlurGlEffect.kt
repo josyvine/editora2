@@ -63,7 +63,7 @@ private class BlurGlShaderProgram(
             uniform float uIntensity;
 
             bool isInsideRegion(vec2 uv) {
-                // Media3 OpenGL coordinate: Y is inverted (0.0 bottom, 1.0 top)
+                // Media3 OpenGL coordinate: Y is inverted (0.0 top, 1.0 bottom)
                 float normY = 1.0 - uv.y;
                 float normX = uv.x;
 
@@ -134,6 +134,12 @@ private class BlurGlShaderProgram(
     init {
         try {
             glProgram = GlProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+            // Bind the full-screen quad vertex position buffer to aFramePosition
+            glProgram.setBufferAttribute(
+                "aFramePosition",
+                GlUtil.getNormalizedCoordinateBounds(),
+                GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE
+            )
         } catch (e: Exception) {
             throw VideoFrameProcessingException("Failed to initialize BlurGlShaderProgram", e)
         }
@@ -192,12 +198,19 @@ private class BlurGlShaderProgram(
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, 0)
             glProgram.setFloatsUniform("uTexSize", floatArrayOf(currentWidth.toFloat(), currentHeight.toFloat()))
 
+            // Re-bind quad vertex buffer attribute before drawing
+            glProgram.setBufferAttribute(
+                "aFramePosition",
+                GlUtil.getNormalizedCoordinateBounds(),
+                GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE
+            )
+
             // Draw full-screen quad through Media3 vertex buffers
             glProgram.bindAttributesAndUniforms()
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GlUtil.checkGlError()
         } catch (e: Exception) {
-            throw VideoFrameProcessingException(e)
+            throw VideoFrameProcessingException("OpenGL error during BlurGlShaderProgram drawFrame", e)
         }
     }
 
@@ -205,8 +218,6 @@ private class BlurGlShaderProgram(
         super.release()
         try {
             glProgram.delete()
-        } catch (e: Exception) {
-            // Ignore gl release exceptions
-        }
+        } catch (_: Exception) {}
     }
 }
