@@ -63,26 +63,45 @@ class ProcessingLogger(
         MutableStateFlow(0).asStateFlow()
     }
 
+    /**
+     * Records a diagnostic log entry with optional multi-line technical details or full Java/OpenGL Throwable stack traces.
+     */
     fun log(
         projectId: String,
         stage: PipelineStatus,
         message: String,
         severity: LogSeverity = LogSeverity.INFO,
-        details: String? = null
+        details: String? = null,
+        throwable: Throwable? = null
     ) {
+        val fullDetails = buildString {
+            if (!details.isNullOrBlank()) {
+                append(details.trim())
+            }
+            if (throwable != null) {
+                if (isNotEmpty()) append("\n\n")
+                append("EXCEPTION: ${throwable.javaClass.name}: ${throwable.message}\n")
+                val rootCause = findRootCause(throwable)
+                if (rootCause !== throwable) {
+                    append("ROOT CAUSE: ${rootCause.javaClass.name}: ${rootCause.message}\n")
+                }
+                append("STACKTRACE:\n").append(throwable.stackTraceToString())
+            }
+        }.takeIf { it.isNotBlank() }
+
         val entry = LogEntry(
             projectId = projectId,
             stage = stage,
             message = message,
             severity = severity,
-            technicalDetails = details,
+            technicalDetails = fullDetails,
             timestamp = System.currentTimeMillis()
         )
 
-        // Always update in-memory
+        // Update in-memory log list
         _inMemoryLogs.value = listOf(entry) + _inMemoryLogs.value
 
-        // Persist to SQLite
+        // Persist complete diagnostic record to SQLite Room Database
         if (persistentLogDao != null) {
             scope.launch {
                 try {
@@ -92,7 +111,7 @@ class ProcessingLogger(
                             stage = stage.name,
                             severity = severity.name,
                             message = message,
-                            technicalDetails = details,
+                            technicalDetails = fullDetails,
                             timestamp = entry.timestamp
                         )
                     )
@@ -101,6 +120,32 @@ class ProcessingLogger(
                 }
             }
         }
+    }
+
+    /**
+     * Dedicated helper to log exceptions with full stack traces.
+     */
+    fun logError(
+        projectId: String,
+        stage: PipelineStatus,
+        message: String,
+        throwable: Throwable? = null
+    ) {
+        log(
+            projectId = projectId,
+            stage = stage,
+            message = message,
+            severity = LogSeverity.ERROR,
+            throwable = throwable
+        )
+    }
+
+    private fun findRootCause(throwable: Throwable): Throwable {
+        var current = throwable
+        while (current.cause != null && current.cause !== current) {
+            current = current.cause!!
+        }
+        return current
     }
 
     fun clear() {
@@ -118,7 +163,7 @@ class ProcessingLogger(
 
     suspend fun buildExportableLogText(): String = withContext(Dispatchers.Default) {
         val currentLogs = logs.value
-        val sb = StringBuilder(currentLogs.size * 128)
+        val sb = StringBuilder(currentLogs.size * 256)
         sb.append("=== EDITORA AI VIDEO STUDIO — COMPLETE AUDIT LOG ===\n")
         sb.append("Generated: ${TimeUtils.formatTimestamp(System.currentTimeMillis())}\n")
         sb.append("Total Entries: ${currentLogs.size}\n\n")
@@ -129,9 +174,10 @@ class ProcessingLogger(
             sb.append("[${item.stage.name}] ")
             sb.append(item.message)
             if (!item.technicalDetails.isNullOrBlank()) {
-                sb.append("\n  DETAILS: ").append(item.technicalDetails.trim().replace("\n", "\n  "))
+                sb.append("\n  >>> DIAGNOSTIC DETAILS:\n  ")
+                sb.append(item.technicalDetails.trim().replace("\n", "\n  "))
             }
-            sb.append("\n")
+            sb.append("\n\n")
         }
         sb.toString()
     }
