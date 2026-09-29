@@ -278,6 +278,7 @@ class ProjectRepositoryImpl(
             sourcePath = sourcePath,
             currentVideoUri = currentVideoUri,
             sourceYoutubeUrl = sourceYoutubeUrl,
+            masterRecipeJson = masterRecipeJson,
             finalVideoUri = finalVideoUri,
             thumbnailUri = thumbnailUri,
             metadata = VideoMetadata(
@@ -310,6 +311,7 @@ class ProjectRepositoryImpl(
             sourcePath = sourcePath,
             currentVideoUri = currentVideoUri,
             sourceYoutubeUrl = sourceYoutubeUrl,
+            masterRecipeJson = masterRecipeJson,
             finalVideoUri = finalVideoUri,
             thumbnailUri = thumbnailUri,
             durationSeconds = metadata.durationSeconds,
