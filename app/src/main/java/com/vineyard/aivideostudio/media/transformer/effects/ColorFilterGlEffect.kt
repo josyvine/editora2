@@ -37,6 +37,8 @@ private class ColorFilterGlShaderProgram(
 ) : SingleFrameGlShaderProgram(useHdr) {
 
     private val glProgram: GlProgram
+    private var currentWidth: Int = 1080
+    private var currentHeight: Int = 1920
 
     companion object {
         private const val VERTEX_SHADER = """
@@ -162,6 +164,8 @@ private class ColorFilterGlShaderProgram(
     }
 
     override fun configure(inputWidth: Int, inputHeight: Int): Size {
+        currentWidth = inputWidth
+        currentHeight = inputHeight
         return Size(inputWidth, inputHeight)
     }
 
@@ -191,7 +195,7 @@ private class ColorFilterGlShaderProgram(
             glProgram.setFloatUniform("uHue", spec.hue)
 
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, 0)
-            glProgram.setFloatsUniform("uTexSize", floatArrayOf(outputSize.width.toFloat(), outputSize.height.toFloat()))
+            glProgram.setFloatsUniform("uTexSize", floatArrayOf(currentWidth.toFloat(), currentHeight.toFloat()))
 
             glProgram.bindAttributesAndUniforms()
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
