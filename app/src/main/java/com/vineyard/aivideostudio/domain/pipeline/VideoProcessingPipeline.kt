@@ -506,7 +506,13 @@ class VideoProcessingPipeline(
                 projectRepository.updateCurrentVideoUri(projectId, uriStr)
                 uriStr
             }
-            is AppResult.Error -> currentVideoUri
+            is AppResult.Error -> {
+                val errorMsg = "Automated video export failed: ${exportResult.error.message}"
+                logger.log(projectId, PipelineStatus.EXPORTING, errorMsg, LogSeverity.ERROR)
+                recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.FAILED, errorMessage = errorMsg)
+                projectRepository.markFailed(projectId, errorMsg)
+                return@withContext AppResult.Error(exportResult.error)
+            }
         }
 
         if (!preferences.keepIntermediateVideos) {
@@ -645,7 +651,20 @@ class VideoProcessingPipeline(
             null
         }
 
-        if (generatedAudioFile != null) {
+        if (generatedAudioFile != null && generatedAudioFile.exists() && generatedAudioFile.length() > 0L) {
+            val audioArtifact = MediaArtifact(
+                id = "art_audio_tts_${System.currentTimeMillis()}",
+                projectId = projectId,
+                stage = PipelineStatus.TTS_GENERATION,
+                type = ArtifactType.SYNTHESIZED_COMMENTARY,
+                fileUri = Uri.fromFile(generatedAudioFile).toString(),
+                filePath = generatedAudioFile.absolutePath,
+                mimeType = "audio/mp4",
+                sizeBytes = generatedAudioFile.length(),
+                durationSeconds = currentDuration
+            )
+            projectRepository.recordArtifact(audioArtifact)
+
             val commentaryEntities = if (!recipe.commentary.segments.isNullOrEmpty()) {
                 recipe.commentary.segments.mapIndexed { idx, seg ->
                     CommentarySegment(
@@ -712,7 +731,13 @@ class VideoProcessingPipeline(
                 projectRepository.recordArtifact(finalArtifact)
                 uriStr
             }
-            is AppResult.Error -> currentVideoUri
+            is AppResult.Error -> {
+                val errorMsg = "Final video export failed: ${exportResult.error.message}"
+                logger.log(projectId, PipelineStatus.EXPORTING, errorMsg, LogSeverity.ERROR)
+                recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.FAILED, errorMessage = errorMsg)
+                projectRepository.markFailed(projectId, errorMsg)
+                return@withContext AppResult.Error(exportResult.error)
+            }
         }
 
         if (!preferences.keepIntermediateVideos) {
