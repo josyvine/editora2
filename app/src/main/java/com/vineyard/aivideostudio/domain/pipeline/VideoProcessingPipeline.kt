@@ -656,7 +656,7 @@ class VideoProcessingPipeline(
                 id = "art_audio_tts_${System.currentTimeMillis()}",
                 projectId = projectId,
                 stage = PipelineStatus.TTS_GENERATION,
-                type = ArtifactType.SYNTHESIZED_COMMENTARY,
+                type = ArtifactType.COMMENTARY_AUDIO,
                 fileUri = Uri.fromFile(generatedAudioFile).toString(),
                 filePath = generatedAudioFile.absolutePath,
                 mimeType = "audio/mp4",
