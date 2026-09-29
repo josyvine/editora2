@@ -158,6 +158,12 @@ private class ColorFilterGlShaderProgram(
     init {
         try {
             glProgram = GlProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+            // Bind the full-screen quad vertex position buffer to aFramePosition
+            glProgram.setBufferAttribute(
+                "aFramePosition",
+                GlUtil.getNormalizedCoordinateBounds(),
+                GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE
+            )
         } catch (e: Exception) {
             throw VideoFrameProcessingException("Failed to initialize ColorFilterGlShaderProgram", e)
         }
@@ -197,11 +203,18 @@ private class ColorFilterGlShaderProgram(
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, 0)
             glProgram.setFloatsUniform("uTexSize", floatArrayOf(currentWidth.toFloat(), currentHeight.toFloat()))
 
+            // Re-bind quad vertex buffer attribute before drawing
+            glProgram.setBufferAttribute(
+                "aFramePosition",
+                GlUtil.getNormalizedCoordinateBounds(),
+                GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE
+            )
+
             glProgram.bindAttributesAndUniforms()
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GlUtil.checkGlError()
         } catch (e: Exception) {
-            throw VideoFrameProcessingException(e)
+            throw VideoFrameProcessingException("OpenGL error during ColorFilterGlShaderProgram drawFrame", e)
         }
     }
 
@@ -209,8 +222,6 @@ private class ColorFilterGlShaderProgram(
         super.release()
         try {
             glProgram.delete()
-        } catch (e: Exception) {
-            // Ignore gl release exceptions
-        }
+        } catch (_: Exception) {}
     }
 }
