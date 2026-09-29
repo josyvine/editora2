@@ -1,33 +1,32 @@
 package com.vineyard.aivideostudio.core.model.effects
 
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
+import com.squareup.moshi.Json
+import com.squareup.moshi.JsonClass
 
 /**
  * Domain and JSON data models representing granular editing tools
  * configured exclusively via the Master Recipe JSON script.
+ * Uses Moshi code generation matching the rest of the project.
  */
 
-@Serializable
 enum class BlurShape {
-    @SerialName("rectangle") RECTANGLE,
-    @SerialName("circle") CIRCLE,
-    @SerialName("full_frame") FULL_FRAME
+    @Json(name = "rectangle") RECTANGLE,
+    @Json(name = "circle") CIRCLE,
+    @Json(name = "full_frame") FULL_FRAME
 }
 
-@Serializable
 enum class BlurType {
-    @SerialName("gaussian") GAUSSIAN,
-    @SerialName("mosaic") MOSAIC,
-    @SerialName("privacy_box") PRIVACY_BOX
+    @Json(name = "gaussian") GAUSSIAN,
+    @Json(name = "mosaic") MOSAIC,
+    @Json(name = "privacy_box") PRIVACY_BOX
 }
 
-@Serializable
+@JsonClass(generateAdapter = true)
 data class NormalizedBounds(
-    @SerialName("left") val left: Float,
-    @SerialName("top") val top: Float,
-    @SerialName("right") val right: Float,
-    @SerialName("bottom") val bottom: Float
+    @Json(name = "left") val left: Float,
+    @Json(name = "top") val top: Float,
+    @Json(name = "right") val right: Float,
+    @Json(name = "bottom") val bottom: Float
 ) {
     init {
         require(left in 0.0f..1.0f) { "left bound must be between 0.0 and 1.0" }
@@ -44,21 +43,21 @@ data class NormalizedBounds(
     val centerY: Float get() = top + (height / 2.0f)
 }
 
-@Serializable
+@JsonClass(generateAdapter = true)
 data class BlurSpec(
-    @SerialName("start_time_ms") val startTimeMs: Long,
-    @SerialName("end_time_ms") val endTimeMs: Long,
-    @SerialName("shape") val shape: BlurShape = BlurShape.RECTANGLE,
-    @SerialName("type") val type: BlurType = BlurType.GAUSSIAN,
-    @SerialName("bounds") val bounds: NormalizedBounds,
-    @SerialName("intensity") val intensity: Float = 15.0f // 1.0 to 50.0 radius / pixel size
+    @Json(name = "start_time_ms") val startTimeMs: Long,
+    @Json(name = "end_time_ms") val endTimeMs: Long,
+    @Json(name = "shape") val shape: BlurShape = BlurShape.RECTANGLE,
+    @Json(name = "type") val type: BlurType = BlurType.GAUSSIAN,
+    @Json(name = "bounds") val bounds: NormalizedBounds,
+    @Json(name = "intensity") val intensity: Float = 15.0f // 1.0 to 50.0 radius / pixel size
 )
 
-@Serializable
+@JsonClass(generateAdapter = true)
 data class SpeedRampSpec(
-    @SerialName("start_time_ms") val startTimeMs: Long,
-    @SerialName("end_time_ms") val endTimeMs: Long,
-    @SerialName("speed_multiplier") val speedMultiplier: Float // e.g. 0.5x, 2.0x, 4.0x
+    @Json(name = "start_time_ms") val startTimeMs: Long,
+    @Json(name = "end_time_ms") val endTimeMs: Long,
+    @Json(name = "speed_multiplier") val speedMultiplier: Float // e.g. 0.5x, 2.0x, 4.0x
 ) {
     init {
         require(speedMultiplier in 0.25f..8.0f) { "Speed multiplier must be between 0.25x and 8.0x" }
@@ -66,74 +65,71 @@ data class SpeedRampSpec(
     }
 }
 
-@Serializable
 enum class OverlayType {
-    @SerialName("emoji") EMOJI,
-    @SerialName("brand_logo") BRAND_LOGO,
-    @SerialName("solid_badge") SOLID_BADGE,
-    @SerialName("sticker") STICKER
+    @Json(name = "emoji") EMOJI,
+    @Json(name = "brand_logo") BRAND_LOGO,
+    @Json(name = "solid_badge") SOLID_BADGE,
+    @Json(name = "sticker") STICKER
 }
 
-@Serializable
+@JsonClass(generateAdapter = true)
 data class ReplacementOverlaySpec(
-    @SerialName("id") val id: String,
-    @SerialName("start_time_ms") val startTimeMs: Long,
-    @SerialName("end_time_ms") val endTimeMs: Long,
-    @SerialName("type") val type: OverlayType,
-    @SerialName("content_value") val contentValue: String, // Emoji unicode, asset path, or base64
-    @SerialName("bounds") val bounds: NormalizedBounds,
-    @SerialName("rotation_degrees") val rotationDegrees: Float = 0.0f,
-    @SerialName("opacity") val opacity: Float = 1.0f
+    @Json(name = "id") val id: String,
+    @Json(name = "start_time_ms") val startTimeMs: Long,
+    @Json(name = "end_time_ms") val endTimeMs: Long,
+    @Json(name = "type") val type: OverlayType,
+    @Json(name = "content_value") val contentValue: String, // Emoji unicode, asset path, or base64
+    @Json(name = "bounds") val bounds: NormalizedBounds,
+    @Json(name = "rotation_degrees") val rotationDegrees: Float = 0.0f,
+    @Json(name = "opacity") val opacity: Float = 1.0f
 )
 
-@Serializable
 enum class ColorPreset {
-    @SerialName("none") NONE,
-    @SerialName("vintage") VINTAGE,
-    @SerialName("dawn") DAWN,
-    @SerialName("dusk") DUSK,
-    @SerialName("halo") HALO,
-    @SerialName("retro_film") RETRO_FILM,
-    @SerialName("bw") BW,
-    @SerialName("high_contrast") HIGH_CONTRAST,
-    @SerialName("cyberpunk") CYBERPUNK,
-    @SerialName("warm") WARM,
-    @SerialName("cool") COOL
+    @Json(name = "none") NONE,
+    @Json(name = "vintage") VINTAGE,
+    @Json(name = "dawn") DAWN,
+    @Json(name = "dusk") DUSK,
+    @Json(name = "halo") HALO,
+    @Json(name = "retro_film") RETRO_FILM,
+    @Json(name = "bw") BW,
+    @Json(name = "high_contrast") HIGH_CONTRAST,
+    @Json(name = "cyberpunk") CYBERPUNK,
+    @Json(name = "warm") WARM,
+    @Json(name = "cool") COOL
 }
 
-@Serializable
+@JsonClass(generateAdapter = true)
 data class ColorGradeSpec(
-    @SerialName("preset") val preset: ColorPreset = ColorPreset.NONE,
-    @SerialName("brightness") val brightness: Float = 0.0f,    // -1.0 to 1.0 (0.0 = neutral)
-    @SerialName("contrast") val contrast: Float = 0.0f,        // -1.0 to 1.0 (0.0 = neutral)
-    @SerialName("saturation") val saturation: Float = 1.0f,    // 0.0 (B&W) to 2.0 (vibrant)
-    @SerialName("sharpness") val sharpness: Float = 0.0f,      // 0.0 to 1.0
-    @SerialName("hue") val hue: Float = 0.0f                  // -180.0 to 180.0 degrees
+    @Json(name = "preset") val preset: ColorPreset = ColorPreset.NONE,
+    @Json(name = "brightness") val brightness: Float = 0.0f,    // -1.0 to 1.0 (0.0 = neutral)
+    @Json(name = "contrast") val contrast: Float = 0.0f,        // -1.0 to 1.0 (0.0 = neutral)
+    @Json(name = "saturation") val saturation: Float = 1.0f,    // 0.0 (B&W) to 2.0 (vibrant)
+    @Json(name = "sharpness") val sharpness: Float = 0.0f,      // 0.0 to 1.0
+    @Json(name = "hue") val hue: Float = 0.0f                  // -180.0 to 180.0 degrees
 )
 
-@Serializable
 enum class TrackingStyle {
-    @SerialName("red_box") RED_BOX,
-    @SerialName("highlight_circle") HIGHLIGHT_CIRCLE,
-    @SerialName("flashing_arrow") FLASHING_ARROW,
-    @SerialName("spotlight") SPOTLIGHT
+    @Json(name = "red_box") RED_BOX,
+    @Json(name = "highlight_circle") HIGHLIGHT_CIRCLE,
+    @Json(name = "flashing_arrow") FLASHING_ARROW,
+    @Json(name = "spotlight") SPOTLIGHT
 }
 
-@Serializable
+@JsonClass(generateAdapter = true)
 data class TrackingKeyframe(
-    @SerialName("time_ms") val timeMs: Long,
-    @SerialName("x") val x: Float, // Normalized 0.0 - 1.0
-    @SerialName("y") val y: Float, // Normalized 0.0 - 1.0
-    @SerialName("width") val width: Float = 0.15f,
-    @SerialName("height") val height: Float = 0.15f
+    @Json(name = "time_ms") val timeMs: Long,
+    @Json(name = "x") val x: Float, // Normalized 0.0 - 1.0
+    @Json(name = "y") val y: Float, // Normalized 0.0 - 1.0
+    @Json(name = "width") val width: Float = 0.15f,
+    @Json(name = "height") val height: Float = 0.15f
 )
 
-@Serializable
+@JsonClass(generateAdapter = true)
 data class TrackingIndicatorSpec(
-    @SerialName("id") val id: String,
-    @SerialName("style") val style: TrackingStyle = TrackingStyle.RED_BOX,
-    @SerialName("color_hex") val colorHex: String = "#FF0000",
-    @SerialName("stroke_width_px") val strokeWidthPx: Float = 6.0f,
-    @SerialName("label") val label: String? = null,
-    @SerialName("keyframes") val keyframes: List<TrackingKeyframe> = emptyList()
+    @Json(name = "id") val id: String,
+    @Json(name = "style") val style: TrackingStyle = TrackingStyle.RED_BOX,
+    @Json(name = "color_hex") val colorHex: String = "#FF0000",
+    @Json(name = "stroke_width_px") val strokeWidthPx: Float = 6.0f,
+    @Json(name = "label") val label: String? = null,
+    @Json(name = "keyframes") val keyframes: List<TrackingKeyframe> = emptyList()
 )
