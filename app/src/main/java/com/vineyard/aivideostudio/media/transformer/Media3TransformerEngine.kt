@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.annotation.OptIn
 import androidx.media3.common.Effect
@@ -17,6 +18,7 @@ import androidx.media3.effect.Crop
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.ScaleAndRotateTransformation
+import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.effect.TextureOverlay
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
@@ -174,11 +176,12 @@ class Media3TransformerEngine(private val context: Context) {
 
     /**
      * Comprehensive production export pass:
-     * 1. Strips copyrighted source audio track and mixes replacement commentary audio (M4A/AAC).
-     * 2. Burns subtitle captions with lower-third concealer pill masks.
-     * 3. Applies Aspect Ratio reframing and Zoom punch-in.
-     * 4. Applies GPU Shaders: Selective Gaussian/Mosaic Blur and Cinematic Color Grading.
-     * 5. Renders Dynamic Overlays: 1:1 Brand Watermark Cover/Emoji Replacer & Sports Motion Tracking.
+     * 1. Slices video into speed-ramped sub-segments via Media3 SpeedChangeEffect.
+     * 2. Strips copyrighted source audio track and mixes replacement commentary audio (M4A/AAC).
+     * 3. Burns subtitle captions with lower-third concealer pill masks.
+     * 4. Applies Aspect Ratio reframing and Zoom punch-in.
+     * 5. Applies GPU Shaders: Selective Gaussian/Mosaic Blur and Cinematic Color Grading.
+     * 6. Renders Dynamic Overlays: 1:1 Brand Watermark Cover/Emoji Replacer & Sports Motion Tracking.
      */
     suspend fun exportVideo(
         inputUri: Uri,
@@ -196,19 +199,19 @@ class Media3TransformerEngine(private val context: Context) {
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
 
-        val videoEffects = mutableListOf<Effect>()
+        val sharedVideoEffects = mutableListOf<Effect>()
 
         // 1. Aspect Ratio Presentation Effect
         when (targetAspectRatio) {
-            "9:16" -> videoEffects.add(Presentation.createForAspectRatio(9f / 16f, Presentation.LAYOUT_SCALE_TO_FIT))
-            "16:9" -> videoEffects.add(Presentation.createForAspectRatio(16f / 9f, Presentation.LAYOUT_SCALE_TO_FIT))
-            "1:1" -> videoEffects.add(Presentation.createForAspectRatio(1f, Presentation.LAYOUT_SCALE_TO_FIT))
+            "9:16" -> sharedVideoEffects.add(Presentation.createForAspectRatio(9f / 16f, Presentation.LAYOUT_SCALE_TO_FIT))
+            "16:9" -> sharedVideoEffects.add(Presentation.createForAspectRatio(16f / 9f, Presentation.LAYOUT_SCALE_TO_FIT))
+            "1:1" -> sharedVideoEffects.add(Presentation.createForAspectRatio(1f, Presentation.LAYOUT_SCALE_TO_FIT))
             else -> {}
         }
 
         // 2. Pronounced Zoom Punch-In Effect
         if (zoomScale > 1.0f) {
-            videoEffects.add(
+            sharedVideoEffects.add(
                 ScaleAndRotateTransformation.Builder()
                     .setScale(zoomScale, zoomScale)
                     .build()
@@ -217,12 +220,12 @@ class Media3TransformerEngine(private val context: Context) {
 
         // 3. Selective Gaussian / Mosaic Blur Shader
         if (blurSpecs.isNotEmpty()) {
-            videoEffects.add(BlurGlEffect(blurSpecs))
+            sharedVideoEffects.add(BlurGlEffect(blurSpecs))
         }
 
         // 4. Color Grading & Filter Shader
         if (colorGrade != null) {
-            videoEffects.add(ColorFilterGlEffect(colorGrade))
+            sharedVideoEffects.add(ColorFilterGlEffect(colorGrade))
         }
 
         // 5. Texture & Canvas Overlays (Captions, 1:1 Emoji Covers, Sports Tracking Boxes)
@@ -237,16 +240,20 @@ class Media3TransformerEngine(private val context: Context) {
         }
 
         if (overlayList.isNotEmpty()) {
-            videoEffects.add(OverlayEffect(ImmutableList.copyOf(overlayList)))
+            sharedVideoEffects.add(OverlayEffect(ImmutableList.copyOf(overlayList)))
         }
 
-        // 6. Construct Video Sequence with Effects
-        val videoMediaItem = MediaItem.fromUri(inputUri)
-        val editedVideoItem = EditedMediaItem.Builder(videoMediaItem)
-            .setRemoveAudio(stripOriginalAudio)
-            .setEffects(Effects(emptyList(), videoEffects))
-            .build()
-        val videoSequence = EditedMediaItemSequence(editedVideoItem)
+        // 6. Build Video Sequence (Multi-Segment Speed Ramping or Single Stream)
+        val videoSequence = if (speedRamps.isNotEmpty()) {
+            buildSpeedRampedSequence(inputUri, stripOriginalAudio, speedRamps, sharedVideoEffects)
+        } else {
+            val videoMediaItem = MediaItem.fromUri(inputUri)
+            val editedVideoItem = EditedMediaItem.Builder(videoMediaItem)
+                .setRemoveAudio(stripOriginalAudio)
+                .setEffects(Effects(emptyList(), sharedVideoEffects))
+                .build()
+            EditedMediaItemSequence(editedVideoItem)
+        }
 
         // 7. Construct Multi-Track Composition (Inject Replacement Commentary Track)
         val composition = if (commentaryAudioUri != null) {
@@ -262,6 +269,100 @@ class Media3TransformerEngine(private val context: Context) {
         }
 
         runTransformer(composition, outputFile)
+    }
+
+    /**
+     * Slices the video into seamless contiguous intervals across the timeline,
+     * applying Media3 SpeedChangeEffect on accelerated sections (e.g., 2.0x typing/scrolling).
+     */
+    private fun buildSpeedRampedSequence(
+        inputUri: Uri,
+        stripAudio: Boolean,
+        speedRamps: List<SpeedRampSpec>,
+        sharedEffects: List<Effect>
+    ): EditedMediaItemSequence {
+        val totalDurationMs = getVideoDurationMs(inputUri)
+        val sortedRamps = speedRamps.sortedBy { it.startTimeMs }
+        val editedItems = mutableListOf<EditedMediaItem>()
+        var cursorMs = 0L
+
+        for (ramp in sortedRamps) {
+            val rampStart = ramp.startTimeMs.coerceIn(0L, totalDurationMs)
+            val rampEnd = ramp.endTimeMs.coerceIn(rampStart, totalDurationMs)
+
+            // 1. Add normal speed interval (1.0x) prior to ramp
+            if (rampStart > cursorMs) {
+                val normalItem = createSegmentItem(inputUri, cursorMs, rampStart, 1.0f, stripAudio, sharedEffects)
+                editedItems.add(normalItem)
+            }
+
+            // 2. Add accelerated speed interval (e.g. 1.75x or 2.0x)
+            if (rampEnd > rampStart) {
+                val fastItem = createSegmentItem(inputUri, rampStart, rampEnd, ramp.speedMultiplier, stripAudio, sharedEffects)
+                editedItems.add(fastItem)
+            }
+
+            cursorMs = rampEnd
+        }
+
+        // 3. Add trailing normal speed interval (1.0x) to the end of the video
+        if (cursorMs < totalDurationMs) {
+            val trailingItem = createSegmentItem(inputUri, cursorMs, totalDurationMs, 1.0f, stripAudio, sharedEffects)
+            editedItems.add(trailingItem)
+        }
+
+        if (editedItems.isEmpty()) {
+            val fallbackItem = EditedMediaItem.Builder(MediaItem.fromUri(inputUri))
+                .setRemoveAudio(stripAudio)
+                .setEffects(Effects(emptyList(), sharedEffects))
+                .build()
+            return EditedMediaItemSequence(fallbackItem)
+        }
+
+        return EditedMediaItemSequence(editedItems)
+    }
+
+    private fun createSegmentItem(
+        uri: Uri,
+        startMs: Long,
+        endMs: Long,
+        speedMultiplier: Float,
+        stripAudio: Boolean,
+        sharedEffects: List<Effect>
+    ): EditedMediaItem {
+        val mediaItem = MediaItem.Builder()
+            .setUri(uri)
+            .setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(startMs)
+                    .setEndPositionMs(endMs)
+                    .build()
+            )
+            .build()
+
+        val segmentEffects = mutableListOf<Effect>()
+        if (speedMultiplier != 1.0f && speedMultiplier > 0.0f) {
+            segmentEffects.add(SpeedChangeEffect(speedMultiplier))
+        }
+        segmentEffects.addAll(sharedEffects)
+
+        return EditedMediaItem.Builder(mediaItem)
+            .setRemoveAudio(stripAudio)
+            .setEffects(Effects(emptyList(), segmentEffects))
+            .build()
+    }
+
+    private fun getVideoDurationMs(uri: Uri): Long {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, uri)
+            val durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            durationStr?.toLongOrNull() ?: 60_000L
+        } catch (_: Exception) {
+            60_000L
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
     }
 
     private suspend fun runTransformer(
