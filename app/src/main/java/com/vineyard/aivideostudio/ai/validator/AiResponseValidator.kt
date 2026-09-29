@@ -3,12 +3,176 @@ package com.vineyard.aivideostudio.ai.validator
 import com.vineyard.aivideostudio.ai.model.CaptionDecision
 import com.vineyard.aivideostudio.ai.model.CommentaryDecision
 import com.vineyard.aivideostudio.ai.model.CropDecision
+import com.vineyard.aivideostudio.ai.model.MasterRecipe
 import com.vineyard.aivideostudio.ai.model.SourceAnalysis
 import com.vineyard.aivideostudio.ai.model.TrimDecision
 import com.vineyard.aivideostudio.ai.model.ZoomDecision
+import com.vineyard.aivideostudio.core.model.effects.BlurSpec
+import com.vineyard.aivideostudio.core.model.effects.ColorGradeSpec
+import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
+import com.vineyard.aivideostudio.core.model.effects.SpeedRampSpec
+import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 import com.vineyard.aivideostudio.core.validation.ValidationResult
 
 object AiResponseValidator {
+
+    /**
+     * Comprehensive validator for Master Recipe JSON scripts including advanced tools.
+     */
+    fun validateMasterRecipe(recipe: MasterRecipe, sourceDurationSeconds: Double): ValidationResult {
+        val durationMs = (sourceDurationSeconds * 1000).toLong()
+
+        // 1. If Audio-Only Mode is active, bypass video transformation constraints
+        if (recipe.audioOnlyMode) {
+            if (recipe.commentary.fullScript.isBlank() && recipe.commentary.segments.isNullOrEmpty()) {
+                return ValidationResult.Invalid("Audio-only recipe must provide a commentary script or audio replacement track.", "commentary")
+            }
+            return ValidationResult.Valid
+        }
+
+        // 2. Validate Speed Adjustments
+        val speedSpecs = recipe.editingPlan.speedAdjustments.map { it.toSpeedRampSpec() }
+        val speedValidation = validateSpeedRamps(speedSpecs, durationMs)
+        if (speedValidation is ValidationResult.Invalid) return speedValidation
+
+        // 3. Validate Blur Effects
+        val blurSpecs = recipe.editingPlan.blurEffects.map { it.toBlurSpec() }
+        val blurValidation = validateBlurSpecs(blurSpecs, durationMs)
+        if (blurValidation is ValidationResult.Invalid) return blurValidation
+
+        // 4. Validate Replacement Overlays (1:1 Logo/Emoji covers)
+        val overlaySpecs = recipe.editingPlan.replacementOverlays.mapIndexed { idx, dto -> dto.toReplacementOverlaySpec(idx) }
+        val overlayValidation = validateReplacementOverlays(overlaySpecs, durationMs)
+        if (overlayValidation is ValidationResult.Invalid) return overlayValidation
+
+        // 5. Validate Color Grading
+        recipe.editingPlan.colorGrade?.toColorGradeSpec()?.let { colorGradeSpec ->
+            val colorValidation = validateColorGrade(colorGradeSpec)
+            if (colorValidation is ValidationResult.Invalid) return colorValidation
+        }
+
+        // 6. Validate Motion Tracking
+        val trackingSpecs = recipe.editingPlan.trackingIndicators.mapIndexed { idx, dto -> dto.toTrackingIndicatorSpec(idx) }
+        val trackingValidation = validateTrackingIndicators(trackingSpecs, durationMs)
+        if (trackingValidation is ValidationResult.Invalid) return trackingValidation
+
+        return ValidationResult.Valid
+    }
+
+    /**
+     * Validates speed-ramping specifications and ensures non-overlapping ranges.
+     */
+    fun validateSpeedRamps(specs: List<SpeedRampSpec>, totalDurationMs: Long): ValidationResult {
+        val sorted = specs.sortedBy { it.startTimeMs }
+        var lastEnd = 0L
+
+        for (spec in sorted) {
+            if (spec.startTimeMs < 0L) {
+                return ValidationResult.Invalid("Speed ramp start time cannot be negative (${spec.startTimeMs}ms)", "speedRamp.startTimeMs")
+            }
+            if (spec.endTimeMs <= spec.startTimeMs) {
+                return ValidationResult.Invalid("Speed ramp end time (${spec.endTimeMs}ms) must be > start time (${spec.startTimeMs}ms)", "speedRamp.endTimeMs")
+            }
+            if (spec.endTimeMs > totalDurationMs + 1000L) {
+                return ValidationResult.Invalid("Speed ramp end time (${spec.endTimeMs}ms) exceeds video duration (${totalDurationMs}ms)", "speedRamp.endTimeMs")
+            }
+            if (spec.startTimeMs < lastEnd) {
+                return ValidationResult.Invalid("Overlapping speed ramp intervals detected at ${spec.startTimeMs}ms", "speedRamp")
+            }
+            if (spec.speedMultiplier !in 0.25f..8.0f) {
+                return ValidationResult.Invalid("Speed multiplier (${spec.speedMultiplier}x) out of supported bounds [0.25x, 8.0x]", "speedMultiplier")
+            }
+            lastEnd = spec.endTimeMs
+        }
+        return ValidationResult.Valid
+    }
+
+    /**
+     * Validates selective Gaussian and mosaic blur areas.
+     */
+    fun validateBlurSpecs(specs: List<BlurSpec>, totalDurationMs: Long): ValidationResult {
+        for (spec in specs) {
+            if (spec.startTimeMs < 0L || spec.endTimeMs <= spec.startTimeMs || spec.endTimeMs > totalDurationMs + 1000L) {
+                return ValidationResult.Invalid("Invalid blur timing window [${spec.startTimeMs}ms, ${spec.endTimeMs}ms]", "blur.timing")
+            }
+            if (spec.bounds.left !in 0f..1f || spec.bounds.top !in 0f..1f ||
+                spec.bounds.right !in 0f..1f || spec.bounds.bottom !in 0f..1f
+            ) {
+                return ValidationResult.Invalid("Blur coordinates must be normalized within [0.0, 1.0]", "blur.bounds")
+            }
+            if (spec.intensity <= 0f || spec.intensity > 100f) {
+                return ValidationResult.Invalid("Blur intensity must be within (0.0, 100.0] (got ${spec.intensity})", "blur.intensity")
+            }
+        }
+        return ValidationResult.Valid
+    }
+
+    /**
+     * Validates 1:1 watermark, brand logo, and emoji replacements.
+     */
+    fun validateReplacementOverlays(specs: List<ReplacementOverlaySpec>, totalDurationMs: Long): ValidationResult {
+        for (spec in specs) {
+            if (spec.contentValue.isBlank()) {
+                return ValidationResult.Invalid("Overlay content value cannot be blank", "replacement.contentValue")
+            }
+            if (spec.startTimeMs < 0L || spec.endTimeMs <= spec.startTimeMs || spec.endTimeMs > totalDurationMs + 1000L) {
+                return ValidationResult.Invalid("Invalid overlay timing window [${spec.startTimeMs}ms, ${spec.endTimeMs}ms]", "replacement.timing")
+            }
+            if (spec.bounds.left !in 0f..1f || spec.bounds.top !in 0f..1f ||
+                spec.bounds.right !in 0f..1f || spec.bounds.bottom !in 0f..1f
+            ) {
+                return ValidationResult.Invalid("Overlay bounds must be normalized within [0.0, 1.0]", "replacement.bounds")
+            }
+            if (spec.opacity !in 0f..1f) {
+                return ValidationResult.Invalid("Overlay opacity must be within [0.0, 1.0] (got ${spec.opacity})", "replacement.opacity")
+            }
+        }
+        return ValidationResult.Valid
+    }
+
+    /**
+     * Validates color grading and visual adjustment ranges.
+     */
+    fun validateColorGrade(spec: ColorGradeSpec): ValidationResult {
+        if (spec.brightness !in -1.0f..1.0f) {
+            return ValidationResult.Invalid("Brightness must be within [-1.0, 1.0] (got ${spec.brightness})", "colorGrade.brightness")
+        }
+        if (spec.contrast !in -1.0f..1.0f) {
+            return ValidationResult.Invalid("Contrast must be within [-1.0, 1.0] (got ${spec.contrast})", "colorGrade.contrast")
+        }
+        if (spec.saturation !in 0.0f..2.0f) {
+            return ValidationResult.Invalid("Saturation must be within [0.0, 2.0] (got ${spec.saturation})", "colorGrade.saturation")
+        }
+        if (spec.sharpness !in 0.0f..1.0f) {
+            return ValidationResult.Invalid("Sharpness must be within [0.0, 1.0] (got ${spec.sharpness})", "colorGrade.sharpness")
+        }
+        if (spec.hue !in -180.0f..180.0f) {
+            return ValidationResult.Invalid("Hue rotation must be within [-180.0, 180.0] degrees (got ${spec.hue})", "colorGrade.hue")
+        }
+        return ValidationResult.Valid
+    }
+
+    /**
+     * Validates motion tracking indicators, keyframes, and bounding coordinates.
+     */
+    fun validateTrackingIndicators(specs: List<TrackingIndicatorSpec>, totalDurationMs: Long): ValidationResult {
+        for (spec in specs) {
+            if (spec.keyframes.isEmpty()) {
+                return ValidationResult.Invalid("Tracking indicator '${spec.id}' must have at least one keyframe", "tracking.keyframes")
+            }
+            var lastTime = -1L
+            for (kf in spec.keyframes) {
+                if (kf.timeMs < lastTime) {
+                    return ValidationResult.Invalid("Keyframes must be chronologically ordered in indicator '${spec.id}'", "tracking.keyframe.time")
+                }
+                if (kf.x !in 0f..1f || kf.y !in 0f..1f) {
+                    return ValidationResult.Invalid("Tracking target coordinates must be normalized within [0.0, 1.0]", "tracking.keyframe.coords")
+                }
+                lastTime = kf.timeMs
+            }
+        }
+        return ValidationResult.Valid
+    }
 
     /**
      * Validates source video analysis output.
