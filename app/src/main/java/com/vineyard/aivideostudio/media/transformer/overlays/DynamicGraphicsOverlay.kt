@@ -12,7 +12,7 @@ import android.graphics.Typeface
 import android.util.Base64
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.CanvasOverlay
+import androidx.media3.effect.BitmapOverlay
 import com.vineyard.aivideostudio.core.model.effects.OverlayType
 import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
 import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
@@ -22,7 +22,7 @@ import java.io.File
 import kotlin.math.sin
 
 /**
- * High-performance Media3 Canvas overlay engine for:
+ * High-performance Media3 BitmapOverlay engine for:
  * 1. 1:1 Brand / Watermark Cover & Emoji/Logo Replacement.
  * 2. Sports Tracking Bounding Boxes (Keyframe Interpolated).
  * 3. Animated Flashing Pointing Arrows & Spotlight Highlights.
@@ -30,8 +30,10 @@ import kotlin.math.sin
 @OptIn(UnstableApi::class)
 class DynamicGraphicsOverlay(
     private val replacements: List<ReplacementOverlaySpec> = emptyList(),
-    private val trackingIndicators: List<TrackingIndicatorSpec> = emptyList()
-) : CanvasOverlay(false) {
+    private val trackingIndicators: List<TrackingIndicatorSpec> = emptyList(),
+    private val targetWidth: Int = 1080,
+    private val targetHeight: Int = 1920
+) : BitmapOverlay() {
 
     // Cached paints to prevent allocations during 60fps frame rendering
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -50,21 +52,27 @@ class DynamicGraphicsOverlay(
     private val arrowPath = Path()
     private val textBounds = Rect()
 
+    // Pre-allocated reusable canvas buffer
+    private val frameBitmap: Bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+    private val canvas: Canvas = Canvas(frameBitmap)
+
     // Decoded bitmap cache for logo / image replacements
     private val bitmapCache = mutableMapOf<String, Bitmap>()
 
-    override fun onDraw(canvas: Canvas, presentationTimeUs: Long) {
+    override fun getBitmap(presentationTimeUs: Long): Bitmap {
         val currentTimeMs = presentationTimeUs / 1000L
-        val width = canvas.width.toFloat()
-        val height = canvas.height.toFloat()
+        frameBitmap.eraseColor(Color.TRANSPARENT)
 
-        if (width <= 0f || height <= 0f) return
+        val width = targetWidth.toFloat()
+        val height = targetHeight.toFloat()
 
         // 1. Render 1:1 Brand / Watermark Replacements & Emojis
         renderReplacements(canvas, currentTimeMs, width, height)
 
         // 2. Render Sports Tracking Boxes & Flashing Arrows
         renderTrackingIndicators(canvas, currentTimeMs, width, height)
+
+        return frameBitmap
     }
 
     private fun renderReplacements(
@@ -162,12 +170,10 @@ class DynamicGraphicsOverlay(
 
             when (indicator.style) {
                 TrackingStyle.RED_BOX -> {
-                    // Draw tracking rectangle with corner accents
                     strokePaint.color = baseColor
                     strokePaint.strokeWidth = indicator.strokeWidthPx
                     canvas.drawRoundRect(rect, 12f, 12f, strokePaint)
 
-                    // Optional athlete / object label badge
                     indicator.label?.let { label ->
                         drawLabelBadge(canvas, label, rect.centerX(), rect.top - 10f)
                     }
@@ -181,7 +187,6 @@ class DynamicGraphicsOverlay(
                 }
 
                 TrackingStyle.FLASHING_ARROW -> {
-                    // Periodic flash / bounce oscillation (3Hz pulse)
                     val pulse = (sin(currentTimeMs * 0.012) * 0.5 + 0.5).toFloat()
                     val bounceOffset = pulse * 18f
 
