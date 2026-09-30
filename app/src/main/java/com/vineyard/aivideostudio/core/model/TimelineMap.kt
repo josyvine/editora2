@@ -36,72 +36,166 @@ data class TimelineMap(
     val removedRanges: List<TimeRange> = emptyList()
 ) {
     /**
-     * Map a timestamp in original video to the timestamp in current edited video.
-     * Takes into account cuts, trims, and speed multipliers (e.g., fast-forward 2x/4x).
-     * Returns null if the original timestamp falls in a removed segment.
+     * Maps an original raw video timestamp (in seconds) to the accelerated / edited timeline.
+     * Takes into account trims, cuts, and speed ramping multipliers (e.g. 1.75x, 2.0x).
+     * If time falls into a gap or outside bounds, it gracefully clamps to the current compressed duration.
      */
-    fun mapOriginalToCurrent(originalTime: Double): Double? {
-        for (seg in segments.filter { it.isRetained }) {
+    fun mapOriginalToCurrent(originalTime: Double): Double {
+        if (segments.isEmpty()) return originalTime.coerceIn(0.0, currentDuration)
+
+        val retained = segments.filter { it.isRetained }.sortedBy { it.originalStart }
+        if (retained.isEmpty()) return 0.0
+
+        // Handle points before first retained segment
+        if (originalTime <= retained.first().originalStart) {
+            return 0.0
+        }
+
+        // Match within active segment
+        for (seg in retained) {
             if (originalTime in seg.originalStart..seg.originalEnd) {
                 val origOffset = originalTime - seg.originalStart
-                val scaledOffset = if (seg.speedMultiplier > 0.0) origOffset / seg.speedMultiplier else origOffset
+                val speed = if (seg.speedMultiplier > 0.0) seg.speedMultiplier else 1.0
+                val scaledOffset = origOffset / speed
                 return (seg.currentStart + scaledOffset).coerceIn(0.0, currentDuration)
             }
         }
-        return null
+
+        // If falls between cut segments, map to the start of the next segment or end of previous
+        for (i in 0 until retained.size - 1) {
+            val currSeg = retained[i]
+            val nextSeg = retained[i + 1]
+            if (originalTime > currSeg.originalEnd && originalTime < nextSeg.originalStart) {
+                return nextSeg.currentStart.coerceIn(0.0, currentDuration)
+            }
+        }
+
+        // Past the last segment
+        return currentDuration
     }
 
     /**
-     * Map a timestamp in current edited video back to original source video,
-     * taking into account speed multipliers and trims.
+     * Millisecond helper for timeline mapping.
+     */
+    fun mapOriginalToCurrentMs(originalTimeMs: Long): Long {
+        val mappedSec = mapOriginalToCurrent(originalTimeMs / 1000.0)
+        return (mappedSec * 1000.0).toLong()
+    }
+
+    /**
+     * Maps a timestamp on the current edited video back to original source video.
      */
     fun mapCurrentToOriginal(currentTime: Double): Double {
         for (seg in segments.filter { it.isRetained }) {
             if (currentTime in seg.currentStart..seg.currentEnd) {
                 val currOffset = currentTime - seg.currentStart
-                val scaledOffset = currOffset * seg.speedMultiplier
-                return (seg.originalStart + scaledOffset).coerceIn(0.0, originalDuration)
+                val speed = if (seg.speedMultiplier > 0.0) seg.speedMultiplier else 1.0
+                val origOffset = currOffset * speed
+                return (seg.originalStart + origOffset).coerceIn(0.0, originalDuration)
             }
         }
         return currentTime.coerceIn(0.0, originalDuration)
     }
 
     /**
-     * Reshapes the timeline with speed-ramping specifications (e.g. 2x fast-forward sections).
+     * Reshapes the timeline with speed-ramping specifications.
+     * Slices segments cleanly at ramp boundaries so non-ramped sections stay at 1.0x
+     * and ramped sections accelerate at the exact multiplier.
      */
     fun withSpeedRamps(speedRamps: List<SpeedRampSpec>): TimelineMap {
         if (speedRamps.isEmpty()) return this
 
-        val updatedSegments = mutableListOf<TimelineSegment>()
+        val sortedRamps = speedRamps.sortedBy { it.startTimeMs }
+        val newSegments = mutableListOf<TimelineSegment>()
         var runningCurrentTime = 0.0
 
-        for (seg in segments.filter { it.isRetained }) {
-            // Find applicable speed ramp for this segment range
-            val ramp = speedRamps.firstOrNull { r ->
-                val rampStartSec = r.startTimeMs / 1000.0
-                val rampEndSec = r.endTimeMs / 1000.0
-                seg.originalStart >= rampStartSec - 0.05 && seg.originalEnd <= rampEndSec + 0.05
+        for (baseSeg in segments.filter { it.isRetained }) {
+            var cursor = baseSeg.originalStart
+
+            // Slice base segment across any speed ramp boundaries that intersect it
+            val intersectingRamps = sortedRamps.filter { ramp ->
+                val rStart = ramp.startTimeMs / 1000.0
+                val rEnd = ramp.endTimeMs / 1000.0
+                rStart < baseSeg.originalEnd && rEnd > baseSeg.originalStart
             }
 
-            val multiplier = ramp?.speedMultiplier?.toDouble() ?: seg.speedMultiplier
-            val effectiveDuration = seg.originalDuration / multiplier
-            val segCurrentStart = runningCurrentTime
-            val segCurrentEnd = runningCurrentTime + effectiveDuration
-
-            updatedSegments.add(
-                seg.copy(
-                    currentStart = segCurrentStart,
-                    currentEnd = segCurrentEnd,
-                    speedMultiplier = multiplier
+            if (intersectingRamps.isEmpty()) {
+                val segDuration = (baseSeg.originalEnd - baseSeg.originalStart) / baseSeg.speedMultiplier
+                newSegments.add(
+                    baseSeg.copy(
+                        id = "${baseSeg.id}_norm_${newSegments.size}",
+                        currentStart = runningCurrentTime,
+                        currentEnd = runningCurrentTime + segDuration
+                    )
                 )
-            )
+                runningCurrentTime += segDuration
+            } else {
+                for (ramp in intersectingRamps) {
+                    val rStart = (ramp.startTimeMs / 1000.0).coerceIn(baseSeg.originalStart, baseSeg.originalEnd)
+                    val rEnd = (ramp.endTimeMs / 1000.0).coerceIn(rStart, baseSeg.originalEnd)
 
-            runningCurrentTime = segCurrentEnd
+                    // 1. Un-accelerated slice before the ramp
+                    if (rStart > cursor) {
+                        val duration = (rStart - cursor) / 1.0
+                        newSegments.add(
+                            TimelineSegment(
+                                id = "${baseSeg.id}_pre_${newSegments.size}",
+                                projectId = projectId,
+                                originalStart = cursor,
+                                originalEnd = rStart,
+                                currentStart = runningCurrentTime,
+                                currentEnd = runningCurrentTime + duration,
+                                isRetained = true,
+                                speedMultiplier = 1.0
+                            )
+                        )
+                        runningCurrentTime += duration
+                    }
+
+                    // 2. Accelerated slice
+                    if (rEnd > rStart) {
+                        val speed = ramp.speedMultiplier.toDouble().coerceAtLeast(0.25)
+                        val duration = (rEnd - rStart) / speed
+                        newSegments.add(
+                            TimelineSegment(
+                                id = "${baseSeg.id}_ramp_${newSegments.size}",
+                                projectId = projectId,
+                                originalStart = rStart,
+                                originalEnd = rEnd,
+                                currentStart = runningCurrentTime,
+                                currentEnd = runningCurrentTime + duration,
+                                isRetained = true,
+                                speedMultiplier = speed
+                            )
+                        )
+                        runningCurrentTime += duration
+                    }
+                    cursor = rEnd
+                }
+
+                // 3. Un-accelerated slice after the last ramp
+                if (cursor < baseSeg.originalEnd) {
+                    val duration = (baseSeg.originalEnd - cursor) / 1.0
+                    newSegments.add(
+                        TimelineSegment(
+                            id = "${baseSeg.id}_post_${newSegments.size}",
+                            projectId = projectId,
+                            originalStart = cursor,
+                            originalEnd = baseSeg.originalEnd,
+                            currentStart = runningCurrentTime,
+                            currentEnd = runningCurrentTime + duration,
+                            isRetained = true,
+                            speedMultiplier = 1.0
+                        )
+                    )
+                    runningCurrentTime += duration
+                }
+            }
         }
 
         return copy(
             currentDuration = runningCurrentTime,
-            segments = updatedSegments
+            segments = newSegments
         )
     }
 
