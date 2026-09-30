@@ -530,6 +530,7 @@ class VideoProcessingPipeline(
     /**
      * Fast-Path Pipeline: Executes when user uploads or pastes a Master Recipe JSON from Google AI Studio.
      * Skips AI reasoning stages 1–7 and runs direct TTS audio generation + Media3 compilation.
+     * AUTOMATED TIMELINE REMAPPING: Accurately shifts dialogue, captions, blurs, and overlays to match speed play.
      */
     private suspend fun executeMasterRecipePipeline(
         project: Project,
@@ -544,7 +545,7 @@ class VideoProcessingPipeline(
         var currentVideoUri = project.sourceUri
         var currentDuration = project.metadata.durationSeconds
 
-        // Extract Advanced JSON Tools
+        // Extract Advanced Tools from Recipe
         val speedSpecs = recipe.editingPlan.speedAdjustments.map { it.toSpeedRampSpec() }
         val blurSpecs = recipe.editingPlan.blurEffects.map { it.toBlurSpec() }
         val replacementSpecs = recipe.editingPlan.replacementOverlays.mapIndexed { idx, dto -> dto.toReplacementOverlaySpec(idx) }
@@ -621,20 +622,43 @@ class VideoProcessingPipeline(
             }
         }
 
-        // 4. CAPTIONS
-        val captionsToSave = recipe.captions.mapIndexed { idx, cap -> cap.toCaption(projectId, idx) }
-        projectRepository.saveCaptions(projectId, captionsToSave)
-        recordStep(projectId, PipelineStatus.CAPTION_ANALYSIS, StepStatus.COMPLETED, "${captionsToSave.size} captions configured")
+        // 4. CONSTRUCT SPEED-COMPRESSED TIMELINE MAP
+        var timelineMap = TimelineMap.identity(projectId, project.metadata.durationSeconds)
+        if (!recipe.audioOnlyMode && recipe.editingPlan.segmentsToKeep.isNotEmpty()) {
+            val highlightSegments = recipe.editingPlan.segmentsToKeep.map { it.toHighlightSegment() }
+            timelineMap = TimelineMapper.applyHighlightSplice(timelineMap, highlightSegments)
+        }
+        if (speedSpecs.isNotEmpty()) {
+            timelineMap = timelineMap.withSpeedRamps(speedSpecs)
+        }
+        projectRepository.saveTimelineMap(projectId, timelineMap)
+        val finalEffectiveDuration = timelineMap.currentDuration
 
-        // 5. SYNCHRONIZED MULTI-CUE AUDIO SYNTHESIS
+        // 5. REMAP ALL SCRIPT TIMESTAMPS TO THE COMPRESSED TIMELINE
+        val rawCaptions = recipe.captions.mapIndexed { idx, cap -> cap.toCaption(projectId, idx) }
+        val remappedCaptions = TimelineMapper.remapCaptions(timelineMap, rawCaptions)
+        projectRepository.saveCaptions(projectId, remappedCaptions)
+        recordStep(projectId, PipelineStatus.CAPTION_ANALYSIS, StepStatus.COMPLETED, "${remappedCaptions.size} captions synchronized")
+
+        val remappedCommentarySegments = if (!recipe.commentary.segments.isNullOrEmpty()) {
+            TimelineMapper.remapCommentarySegments(timelineMap, recipe.commentary.segments)
+        } else {
+            emptyList()
+        }
+
+        val remappedBlurSpecs = TimelineMapper.remapBlurSpecs(timelineMap, blurSpecs)
+        val remappedReplacementOverlays = TimelineMapper.remapReplacementOverlays(timelineMap, replacementSpecs)
+        val remappedTrackingIndicators = TimelineMapper.remapTrackingIndicators(timelineMap, trackingSpecs)
+
+        // 6. SYNCHRONIZED MULTI-CUE AUDIO SYNTHESIS ON COMPRESSED TIMELINE
         onStageChanged(PipelineStatus.TTS_GENERATION, "Synthesizing synchronized voiceover track")
         recordStep(projectId, PipelineStatus.TTS_GENERATION, StepStatus.IN_PROGRESS, "Synthesizing Audio")
 
         val commentaryAudioOutputFile = storageManager.createAudioOutputFile(projectId, "commentary_final.m4a")
-        val generatedAudioFile: File? = if (!recipe.commentary.segments.isNullOrEmpty()) {
+        val generatedAudioFile: File? = if (remappedCommentarySegments.isNotEmpty()) {
             synthesizeSegmentedCommentary(
                 projectId = projectId,
-                segments = recipe.commentary.segments,
+                segments = remappedCommentarySegments,
                 tone = recipe.commentary.tone,
                 voiceName = recipe.commentary.voiceName,
                 outputM4aFile = commentaryAudioOutputFile
@@ -661,12 +685,12 @@ class VideoProcessingPipeline(
                 filePath = generatedAudioFile.absolutePath,
                 mimeType = "audio/mp4",
                 sizeBytes = generatedAudioFile.length(),
-                durationSeconds = currentDuration
+                durationSeconds = finalEffectiveDuration
             )
             projectRepository.recordArtifact(audioArtifact)
 
-            val commentaryEntities = if (!recipe.commentary.segments.isNullOrEmpty()) {
-                recipe.commentary.segments.mapIndexed { idx, seg ->
+            val commentaryEntities = if (remappedCommentarySegments.isNotEmpty()) {
+                remappedCommentarySegments.mapIndexed { idx, seg ->
                     CommentarySegment(
                         id = "comm_recipe_${idx}_${System.currentTimeMillis()}",
                         projectId = projectId,
@@ -682,7 +706,7 @@ class VideoProcessingPipeline(
                         id = "comm_recipe_${System.currentTimeMillis()}",
                         projectId = projectId,
                         start = 0.0,
-                        end = currentDuration,
+                        end = finalEffectiveDuration,
                         text = recipe.commentary.fullScript,
                         audioArtifactUri = Uri.fromFile(generatedAudioFile).toString()
                     )
@@ -692,7 +716,7 @@ class VideoProcessingPipeline(
             recordStep(projectId, PipelineStatus.TTS_GENERATION, StepStatus.COMPLETED, "Synchronized voiceover audio ready")
         }
 
-        // 6. FINAL PRODUCTION EXPORT (APPLYING SPEED RAMPS, GPU SHADERS & OVERLAYS)
+        // 7. FINAL PRODUCTION EXPORT (HARDWARE SPEED PLAY, SYNCHRONIZED SHADERS & OVERLAYS)
         onStageChanged(PipelineStatus.EXPORTING, "Rendering final production with hardware speed ramping & shaders")
         recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.IN_PROGRESS, "Exporting final video")
 
@@ -702,14 +726,14 @@ class VideoProcessingPipeline(
             outputFile = finalOutputFile,
             commentaryAudioUri = generatedAudioFile?.let { Uri.fromFile(it) },
             stripOriginalAudio = true,
-            captions = captionsToSave,
+            captions = remappedCaptions,
             targetAspectRatio = if (recipe.audioOnlyMode) "ORIGINAL" else (recipe.projectInfo?.targetAspectRatio ?: project.targetAspectRatio),
             zoomScale = if (recipe.audioOnlyMode) 1.0f else (recipe.editingPlan.zoom?.scale ?: 1.0f),
             speedRamps = speedSpecs,
-            blurSpecs = blurSpecs,
-            replacementOverlays = replacementSpecs,
+            blurSpecs = remappedBlurSpecs,
+            replacementOverlays = remappedReplacementOverlays,
             colorGrade = colorGradeSpec,
-            trackingIndicators = trackingSpecs
+            trackingIndicators = remappedTrackingIndicators
         )
 
         val finalVideoUri = when (exportResult) {
@@ -726,7 +750,7 @@ class VideoProcessingPipeline(
                     filePath = finalOutputFile.absolutePath,
                     mimeType = "video/mp4",
                     sizeBytes = finalOutputFile.length(),
-                    durationSeconds = currentDuration
+                    durationSeconds = finalEffectiveDuration
                 )
                 projectRepository.recordArtifact(finalArtifact)
                 uriStr
@@ -746,7 +770,7 @@ class VideoProcessingPipeline(
 
         projectRepository.markCompleted(projectId, finalVideoUri)
         recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.COMPLETED, "Export complete")
-        logger.log(projectId, PipelineStatus.COMPLETED, "Recipe Production complete! Saved ${finalOutputFile.length()} bytes.", LogSeverity.SUCCESS)
+        logger.log(projectId, PipelineStatus.COMPLETED, "Recipe Production complete! Saved ${finalOutputFile.length()} bytes (${String.format("%.2f", finalEffectiveDuration)}s).", LogSeverity.SUCCESS)
         onStageChanged(PipelineStatus.COMPLETED, "Production complete! Video ready.")
 
         val updatedProject = projectRepository.getProjectById(projectId) ?: project
