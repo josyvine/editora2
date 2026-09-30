@@ -537,13 +537,18 @@ class VideoProcessingPipeline(
         onStageChanged: (PipelineStatus, String) -> Unit
     ): AppResult<Project> = withContext(Dispatchers.IO) {
         val projectId = project.id
-        logger.log(projectId, PipelineStatus.SOURCE_ANALYSIS, "Executing via Instant Master Recipe Mode (0 AI Token Delay)", LogSeverity.SUCCESS)
+        logger.log(
+            projectId,
+            PipelineStatus.SOURCE_ANALYSIS,
+            "Executing Instant Master Recipe Mode (0 AI Token Delay)",
+            LogSeverity.SUCCESS
+        )
 
         val recipe = JsonUtils.fromJson<MasterRecipe>(project.masterRecipeJson ?: "")
             ?: return@withContext AppResult.Error(AppError.ValidationError("Corrupted Master Recipe JSON"))
 
         var currentVideoUri = project.sourceUri
-        var currentDuration = project.metadata.durationSeconds
+        val rawSourceDuration = project.metadata.durationSeconds
 
         // Extract Advanced Tools from Recipe
         val speedSpecs = recipe.editingPlan.speedAdjustments.map { it.toSpeedRampSpec() }
@@ -552,12 +557,20 @@ class VideoProcessingPipeline(
         val colorGradeSpec = recipe.editingPlan.colorGrade?.toColorGradeSpec()
         val trackingSpecs = recipe.editingPlan.trackingIndicators.mapIndexed { idx, dto -> dto.toTrackingIndicatorSpec(idx) }
 
+        logger.log(
+            projectId,
+            PipelineStatus.SOURCE_ANALYSIS,
+            "Master Recipe Configuration: AudioOnly=${recipe.audioOnlyMode} | SpeedRamps=${speedSpecs.size} | Blurs=${blurSpecs.size} | Overlays=${replacementSpecs.size} | ColorGrade=${colorGradeSpec?.preset ?: "None"}",
+            LogSeverity.INFO
+        )
+
         // 1. SPLICE HIGHLIGHTS (Bypassed if audioOnlyMode is true)
         if (!recipe.audioOnlyMode) {
             val highlightSegments = recipe.editingPlan.segmentsToKeep.map { it.toHighlightSegment() }
             if (highlightSegments.isNotEmpty()) {
                 onStageChanged(PipelineStatus.TRIM_EXECUTION, "Media3 assembling ${highlightSegments.size} highlight scenes")
                 recordStep(projectId, PipelineStatus.TRIM_EXECUTION, StepStatus.IN_PROGRESS, "Splicing highlight scenes")
+                logger.log(projectId, PipelineStatus.TRIM_EXECUTION, "Splicing ${highlightSegments.size} highlight cuts", LogSeverity.INFO)
 
                 val trimOutputFile = storageManager.createStageOutputFile(projectId, PipelineStatus.TRIM_EXECUTION)
                 val spliceResult = transformerEngine.spliceHighlightSegments(
@@ -569,9 +582,10 @@ class VideoProcessingPipeline(
 
                 if (spliceResult is AppResult.Success) {
                     currentVideoUri = Uri.fromFile(trimOutputFile).toString()
-                    currentDuration = highlightSegments.sumOf { it.end - it.start }
+                    val splicedDuration = highlightSegments.sumOf { it.end - it.start }
                     projectRepository.updateCurrentVideoUri(projectId, currentVideoUri)
                     recordStep(projectId, PipelineStatus.TRIM_EXECUTION, StepStatus.COMPLETED, "Highlight montage assembled")
+                    logger.log(projectId, PipelineStatus.TRIM_EXECUTION, "Highlight montage assembled: ${String.format("%.2f", splicedDuration)}s", LogSeverity.SUCCESS)
                 }
             }
 
@@ -596,6 +610,7 @@ class VideoProcessingPipeline(
                     currentVideoUri = Uri.fromFile(cropOutputFile).toString()
                     projectRepository.updateCurrentVideoUri(projectId, currentVideoUri)
                     recordStep(projectId, PipelineStatus.CROP_EXECUTION, StepStatus.COMPLETED, "Crop executed")
+                    logger.log(projectId, PipelineStatus.CROP_EXECUTION, "Crop executed (${crop.x}, ${crop.y}, ${crop.width}x${crop.height})", LogSeverity.SUCCESS)
                 }
             }
 
@@ -618,12 +633,13 @@ class VideoProcessingPipeline(
                     currentVideoUri = Uri.fromFile(zoomOutputFile).toString()
                     projectRepository.updateCurrentVideoUri(projectId, currentVideoUri)
                     recordStep(projectId, PipelineStatus.ZOOM_EXECUTION, StepStatus.COMPLETED, "Zoom executed (${zoomScale}x)")
+                    logger.log(projectId, PipelineStatus.ZOOM_EXECUTION, "Zoom executed (${zoomScale}x)", LogSeverity.SUCCESS)
                 }
             }
         }
 
         // 4. CONSTRUCT SPEED-COMPRESSED TIMELINE MAP
-        var timelineMap = TimelineMap.identity(projectId, project.metadata.durationSeconds)
+        var timelineMap = TimelineMap.identity(projectId, rawSourceDuration)
         if (!recipe.audioOnlyMode && recipe.editingPlan.segmentsToKeep.isNotEmpty()) {
             val highlightSegments = recipe.editingPlan.segmentsToKeep.map { it.toHighlightSegment() }
             timelineMap = TimelineMapper.applyHighlightSplice(timelineMap, highlightSegments)
@@ -633,6 +649,15 @@ class VideoProcessingPipeline(
         }
         projectRepository.saveTimelineMap(projectId, timelineMap)
         val finalEffectiveDuration = timelineMap.currentDuration
+        val timeSaved = (rawSourceDuration - finalEffectiveDuration).coerceAtLeast(0.0)
+
+        logger.log(
+            projectId,
+            PipelineStatus.TRIM_ANALYSIS,
+            "Timeline Compression: Source=${String.format("%.2f", rawSourceDuration)}s -> Sped-Up=${String.format("%.2f", finalEffectiveDuration)}s (Saved ${String.format("%.2f", timeSaved)}s) | Speed Ramps=${speedSpecs.size}",
+            LogSeverity.INFO,
+            speedSpecs.joinToString("\n") { "Ramp: ${it.startTimeMs}ms to ${it.endTimeMs}ms @ ${it.speedMultiplier}x" }
+        )
 
         // 5. REMAP ALL SCRIPT TIMESTAMPS TO THE COMPRESSED TIMELINE
         val rawCaptions = recipe.captions.mapIndexed { idx, cap -> cap.toCaption(projectId, idx) }
@@ -650,9 +675,22 @@ class VideoProcessingPipeline(
         val remappedReplacementOverlays = TimelineMapper.remapReplacementOverlays(timelineMap, replacementSpecs)
         val remappedTrackingIndicators = TimelineMapper.remapTrackingIndicators(timelineMap, trackingSpecs)
 
+        logger.log(
+            projectId,
+            PipelineStatus.CAPTION_ANALYSIS,
+            "Automated Remapping: Translated ${remappedCommentarySegments.size} voice cues, ${remappedCaptions.size} captions, ${remappedBlurSpecs.size} blurs, and ${remappedReplacementOverlays.size} overlays to compressed timeline",
+            LogSeverity.INFO
+        )
+
         // 6. SYNCHRONIZED MULTI-CUE AUDIO SYNTHESIS ON COMPRESSED TIMELINE
         onStageChanged(PipelineStatus.TTS_GENERATION, "Synthesizing synchronized voiceover track")
         recordStep(projectId, PipelineStatus.TTS_GENERATION, StepStatus.IN_PROGRESS, "Synthesizing Audio")
+        logger.log(
+            projectId,
+            PipelineStatus.TTS_GENERATION,
+            "Synthesizing Soundtrack: ${remappedCommentarySegments.size} cues | Voice=${recipe.commentary.voiceName ?: "Puck"} | Persona=${recipe.commentary.tone ?: "Default"}",
+            LogSeverity.INFO
+        )
 
         val commentaryAudioOutputFile = storageManager.createAudioOutputFile(projectId, "commentary_final.m4a")
         val generatedAudioFile: File? = if (remappedCommentarySegments.isNotEmpty()) {
@@ -714,11 +752,23 @@ class VideoProcessingPipeline(
             }
             projectRepository.saveCommentary(projectId, commentaryEntities)
             recordStep(projectId, PipelineStatus.TTS_GENERATION, StepStatus.COMPLETED, "Synchronized voiceover audio ready")
+            logger.log(
+                projectId,
+                PipelineStatus.TTS_GENERATION,
+                "Soundtrack Synthesized: ${generatedAudioFile.length()} bytes (${String.format("%.2f", finalEffectiveDuration)}s)",
+                LogSeverity.SUCCESS
+            )
         }
 
         // 7. FINAL PRODUCTION EXPORT (HARDWARE SPEED PLAY, SYNCHRONIZED SHADERS & OVERLAYS)
         onStageChanged(PipelineStatus.EXPORTING, "Rendering final production with hardware speed ramping & shaders")
         recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.IN_PROGRESS, "Exporting final video")
+        logger.log(
+            projectId,
+            PipelineStatus.EXPORTING,
+            "Starting Media3 Hardware Export: Slices=${speedSpecs.size + 1} | Overlays=${remappedReplacementOverlays.size} | Blurs=${remappedBlurSpecs.size} | PurgeSourceAudio=true",
+            LogSeverity.INFO
+        )
 
         val finalOutputFile = storageManager.createFinalOutputFile(projectId)
         val exportResult = transformerEngine.exportVideo(
@@ -770,7 +820,12 @@ class VideoProcessingPipeline(
 
         projectRepository.markCompleted(projectId, finalVideoUri)
         recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.COMPLETED, "Export complete")
-        logger.log(projectId, PipelineStatus.COMPLETED, "Recipe Production complete! Saved ${finalOutputFile.length()} bytes (${String.format("%.2f", finalEffectiveDuration)}s).", LogSeverity.SUCCESS)
+        logger.log(
+            projectId,
+            PipelineStatus.COMPLETED,
+            "Master Recipe Production Complete! Rendered ${finalOutputFile.length()} bytes (${String.format("%.2f", finalEffectiveDuration)}s) with replaced AI audio.",
+            LogSeverity.SUCCESS
+        )
         onStageChanged(PipelineStatus.COMPLETED, "Production complete! Video ready.")
 
         val updatedProject = projectRepository.getProjectById(projectId) ?: project
@@ -813,6 +868,13 @@ class VideoProcessingPipeline(
                         currentTimelineByteOffset = targetByteOffset
                     }
 
+                    logger.log(
+                        projectId,
+                        PipelineStatus.TTS_GENERATION,
+                        "Synthesizing Cue ${idx + 1}/${segments.size} [${String.format("%.1f", segStartSec)}s]: \"${seg.text.take(35)}...\"",
+                        LogSeverity.INFO
+                    )
+
                     // Synthesize individual segment
                     val segPcmFile = storageManager.createAudioOutputFile(projectId, "seg_${idx}_raw.pcm")
                     val segTtsResult = liveCommentatorManager.generateLiveCommentary(
@@ -854,7 +916,14 @@ class VideoProcessingPipeline(
                     return outputM4aFile
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            logger.log(
+                projectId,
+                PipelineStatus.TTS_GENERATION,
+                "Error during multi-cue audio synthesis: ${e.message}",
+                LogSeverity.ERROR,
+                throwable = e
+            )
             tempPcmFile.delete()
         }
 
