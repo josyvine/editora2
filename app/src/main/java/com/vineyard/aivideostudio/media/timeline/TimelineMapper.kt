@@ -1,11 +1,16 @@
 package com.vineyard.aivideostudio.media.timeline
 
+import com.vineyard.aivideostudio.ai.model.CommentarySegmentDto
 import com.vineyard.aivideostudio.ai.model.HighlightSegment
 import com.vineyard.aivideostudio.ai.model.TrimSegment
+import com.vineyard.aivideostudio.core.model.Caption
 import com.vineyard.aivideostudio.core.model.PipelineStatus
 import com.vineyard.aivideostudio.core.model.TimeRange
 import com.vineyard.aivideostudio.core.model.TimelineMap
 import com.vineyard.aivideostudio.core.model.TimelineSegment
+import com.vineyard.aivideostudio.core.model.effects.BlurSpec
+import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
+import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 
 object TimelineMapper {
 
@@ -41,7 +46,8 @@ object TimelineMapper {
                     currentStart = currentCursor,
                     currentEnd = currentCursor + duration,
                     isRetained = true,
-                    stageApplied = stage
+                    stageApplied = stage,
+                    speedMultiplier = 1.0
                 )
             )
             currentCursor += duration
@@ -105,7 +111,8 @@ object TimelineMapper {
                             currentStart = currentCursor,
                             currentEnd = currentCursor + pieceDuration,
                             isRetained = true,
-                            stageApplied = stage
+                            stageApplied = stage,
+                            speedMultiplier = seg.speedMultiplier
                         )
                     )
                     currentCursor += pieceDuration
@@ -129,7 +136,8 @@ object TimelineMapper {
                         currentStart = currentCursor,
                         currentEnd = currentCursor + pieceDuration,
                         isRetained = true,
-                        stageApplied = stage
+                        stageApplied = stage,
+                        speedMultiplier = seg.speedMultiplier
                     )
                 )
                 currentCursor += pieceDuration
@@ -146,26 +154,100 @@ object TimelineMapper {
     }
 
     /**
-     * Translates a timestamp from the original raw video timeline to the current edited montage timeline.
+     * Remaps all commentary cue start and end timestamps from the raw video timeline
+     * to the compressed timeline (taking speed play and highlight cuts into account).
      */
-    fun mapOriginalToCurrent(timelineMap: TimelineMap, originalSec: Double): Double? {
-        val matchingSegment = timelineMap.segments.firstOrNull {
-            it.isRetained && originalSec >= it.originalStart && originalSec <= it.originalEnd
-        } ?: return null
+    fun remapCommentarySegments(
+        timelineMap: TimelineMap,
+        segments: List<CommentarySegmentDto>
+    ): List<CommentarySegmentDto> {
+        return segments.map { seg ->
+            val origStart = seg.start ?: 0.0
+            val origEnd = seg.end ?: (origStart + 3.0)
+            val newStart = timelineMap.mapOriginalToCurrent(origStart)
+            val newEnd = timelineMap.mapOriginalToCurrent(origEnd).coerceAtLeast(newStart + 0.5)
 
-        val offset = originalSec - matchingSegment.originalStart
-        return matchingSegment.currentStart + offset
+            seg.copy(
+                start = newStart,
+                end = newEnd
+            )
+        }
     }
 
     /**
-     * Translates a timestamp from the current edited montage timeline back to the original raw video timeline.
+     * Remaps burned-in captions to match the accelerated video timeline.
      */
-    fun mapCurrentToOriginal(timelineMap: TimelineMap, currentSec: Double): Double? {
-        val matchingSegment = timelineMap.segments.firstOrNull {
-            it.isRetained && currentSec >= it.currentStart && currentSec <= it.currentEnd
-        } ?: return null
+    fun remapCaptions(
+        timelineMap: TimelineMap,
+        captions: List<Caption>
+    ): List<Caption> {
+        return captions.map { cap ->
+            val newStart = timelineMap.mapOriginalToCurrent(cap.start)
+            val newEnd = timelineMap.mapOriginalToCurrent(cap.end).coerceAtLeast(newStart + 0.5)
 
-        val offset = currentSec - matchingSegment.currentStart
-        return matchingSegment.originalStart + offset
+            cap.copy(
+                start = newStart,
+                end = newEnd
+            )
+        }
+    }
+
+    /**
+     * Remaps selective Gaussian and Mosaic privacy blur time windows.
+     */
+    fun remapBlurSpecs(
+        timelineMap: TimelineMap,
+        blurSpecs: List<BlurSpec>
+    ): List<BlurSpec> {
+        return blurSpecs.map { spec ->
+            val newStartMs = timelineMap.mapOriginalToCurrentMs(spec.startTimeMs)
+            val newEndMs = timelineMap.mapOriginalToCurrentMs(spec.endTimeMs).coerceAtLeast(newStartMs + 200L)
+
+            spec.copy(
+                startTimeMs = newStartMs,
+                endTimeMs = newEndMs
+            )
+        }
+    }
+
+    /**
+     * Remaps 1:1 brand logo / watermark / emoji replacements to the compressed timeline.
+     */
+    fun remapReplacementOverlays(
+        timelineMap: TimelineMap,
+        overlays: List<ReplacementOverlaySpec>
+    ): List<ReplacementOverlaySpec> {
+        return overlays.map { overlay ->
+            val newStartMs = timelineMap.mapOriginalToCurrentMs(overlay.startTimeMs)
+            val newEndMs = timelineMap.mapOriginalToCurrentMs(overlay.endTimeMs).coerceAtLeast(newStartMs + 200L)
+
+            overlay.copy(
+                startTimeMs = newStartMs,
+                endTimeMs = newEndMs
+            )
+        }
+    }
+
+    /**
+     * Remaps motion tracking keyframes (sports red box / flashing arrows).
+     */
+    fun remapTrackingIndicators(
+        timelineMap: TimelineMap,
+        indicators: List<TrackingIndicatorSpec>
+    ): List<TrackingIndicatorSpec> {
+        return indicators.map { indicator ->
+            val remappedKeyframes = indicator.keyframes.map { kf ->
+                kf.copy(timeMs = timelineMap.mapOriginalToCurrentMs(kf.timeMs))
+            }
+            indicator.copy(keyframes = remappedKeyframes)
+        }
+    }
+
+    fun mapOriginalToCurrent(timelineMap: TimelineMap, originalSec: Double): Double {
+        return timelineMap.mapOriginalToCurrent(originalSec)
+    }
+
+    fun mapCurrentToOriginal(timelineMap: TimelineMap, currentSec: Double): Double {
+        return timelineMap.mapCurrentToOriginal(currentSec)
     }
 }
