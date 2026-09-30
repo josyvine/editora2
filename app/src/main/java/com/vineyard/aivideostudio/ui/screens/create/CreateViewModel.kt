@@ -2,6 +2,7 @@ package com.vineyard.aivideostudio.ui.screens.create
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vineyard.aivideostudio.ai.model.MasterRecipe
@@ -16,10 +17,12 @@ import com.vineyard.aivideostudio.data.storage.ProjectStorageManager
 import com.vineyard.aivideostudio.media.video.VideoMetadataReader
 import com.vineyard.aivideostudio.media.video.VideoValidator
 import com.vineyard.aivideostudio.project.repository.ProjectRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.UUID
@@ -78,6 +81,8 @@ class CreateViewModel(
     private val _uiState = MutableStateFlow(CreateUiState())
     val uiState: StateFlow<CreateUiState> = _uiState.asStateFlow()
 
+    private val MAX_JSON_FILE_BYTES = 5 * 1024 * 1024L // 5 MB hard limit for JSON files
+
     fun onProjectNameChanged(name: String) {
         _uiState.value = _uiState.value.copy(projectName = name, errorMessage = null)
     }
@@ -94,17 +99,66 @@ class CreateViewModel(
         _uiState.value = _uiState.value.copy(isRecipeMode = isRecipeMode, errorMessage = null)
     }
 
+    /**
+     * Safely reads JSON files on Dispatchers.IO with strict size checking to prevent OutOfMemoryError crashes.
+     */
     fun onJsonFileSelected(uri: Uri) {
         viewModelScope.launch {
-            try {
-                _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
-                val inputStream = context.contentResolver.openInputStream(uri)
-                    ?: throw IllegalArgumentException("Cannot open selected JSON file")
-                val text = BufferedReader(InputStreamReader(inputStream)).use { it.readText() }
-                val parsed = JsonUtils.fromJson<MasterRecipe>(text)
-                    ?: throw IllegalArgumentException("Invalid Editora Master Recipe JSON format")
+            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
 
-                val fileName = UriUtils.getFileName(context, uri)
+            try {
+                val (text, parsed, fileName) = withContext(Dispatchers.IO) {
+                    val contentResolver = context.contentResolver
+
+                    // 1. Check file size before reading to prevent OutOfMemoryError
+                    var fileSize = -1L
+                    try {
+                        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) {
+                                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                                if (sizeIndex != -1 && !cursor.isNull(sizeIndex)) {
+                                    fileSize = cursor.getLong(sizeIndex)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    if (fileSize > MAX_JSON_FILE_BYTES) {
+                        throw IllegalArgumentException(
+                            "Selected file is too large (${fileSize / (1024 * 1024)} MB). Please select a .json recipe file, not a video."
+                        )
+                    }
+
+                    // 2. Stream-read with bounded buffer
+                    val inputStream = contentResolver.openInputStream(uri)
+                        ?: throw IllegalArgumentException("Cannot open selected file")
+
+                    val stringBuilder = StringBuilder()
+                    BufferedReader(InputStreamReader(inputStream)).use { reader ->
+                        val buffer = CharArray(8192)
+                        var totalCharsRead = 0
+                        var charsRead: Int
+                        while (reader.read(buffer).also { charsRead = it } != -1) {
+                            totalCharsRead += charsRead
+                            if (totalCharsRead > MAX_JSON_FILE_BYTES) {
+                                throw IllegalArgumentException("Recipe file exceeds 5MB size limit.")
+                            }
+                            stringBuilder.append(buffer, 0, charsRead)
+                        }
+                    }
+
+                    val jsonText = stringBuilder.toString().trim()
+                    if (!jsonText.startsWith("{") && !jsonText.startsWith("[")) {
+                        throw IllegalArgumentException("Selected file does not contain valid JSON data.")
+                    }
+
+                    val parsedRecipe = JsonUtils.fromJson<MasterRecipe>(jsonText)
+                        ?: throw IllegalArgumentException("Invalid Editora Master Recipe JSON format")
+
+                    val resolvedFileName = UriUtils.getFileName(context, uri)
+                    Triple(jsonText, parsedRecipe, resolvedFileName)
+                }
+
                 val defaultProjectName = parsed.projectInfo?.title ?: _uiState.value.projectName
                 val defaultRatio = parsed.projectInfo?.targetAspectRatio ?: _uiState.value.targetAspectRatio
 
@@ -118,10 +172,16 @@ class CreateViewModel(
                     isLoading = false,
                     errorMessage = null
                 )
-            } catch (e: Exception) {
+            } catch (oom: OutOfMemoryError) {
+                System.gc()
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    errorMessage = "Failed to load Recipe JSON: ${e.message}"
+                    errorMessage = "Out of memory: The selected file is too large to load as JSON."
+                )
+            } catch (t: Throwable) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = "Failed to load Recipe JSON: ${t.message}"
                 )
             }
         }
@@ -130,6 +190,13 @@ class CreateViewModel(
     fun onJsonPasted(jsonText: String) {
         if (jsonText.isBlank()) return
         try {
+            if (jsonText.length > MAX_JSON_FILE_BYTES) {
+                _uiState.value = _uiState.value.copy(
+                    errorMessage = "Pasted text is too large (maximum 5MB allowed)."
+                )
+                return
+            }
+
             val parsed = JsonUtils.fromJson<MasterRecipe>(jsonText.trim())
                 ?: throw IllegalArgumentException("Invalid Editora Master Recipe JSON structure")
 
@@ -145,9 +212,9 @@ class CreateViewModel(
                 targetAspectRatio = defaultRatio,
                 errorMessage = null
             )
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             _uiState.value = _uiState.value.copy(
-                errorMessage = "Failed to parse pasted Recipe: ${e.message}"
+                errorMessage = "Failed to parse pasted Recipe: ${t.message}"
             )
         }
     }
